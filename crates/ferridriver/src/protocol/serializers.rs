@@ -527,6 +527,36 @@ impl SerializedValue {
 
   // ── Conversion helpers ────────────────────────────────────────────────────
 
+  /// Owned variant of [`Self::from_json`] that moves strings and object keys
+  /// instead of cloning them.
+  #[must_use]
+  pub fn from_json_owned(value: serde_json::Value, ctx: &mut SerializationContext) -> Self {
+    match value {
+      serde_json::Value::Null => Self::null(),
+      serde_json::Value::Bool(b) => Self::Bool(b),
+      serde_json::Value::Number(num) => num
+        .as_f64()
+        .map_or_else(|| Self::BigInt(num.to_string()), Self::from_f64),
+      serde_json::Value::String(s) => Self::Str(s),
+      serde_json::Value::Array(items) => {
+        let id = ctx.alloc_id();
+        let wire_items = items.into_iter().map(|v| Self::from_json_owned(v, ctx)).collect();
+        Self::Array { id, items: wire_items }
+      },
+      serde_json::Value::Object(map) => {
+        let id = ctx.alloc_id();
+        let entries = map
+          .into_iter()
+          .map(|(k, v)| PropertyEntry {
+            k,
+            v: Self::from_json_owned(v, ctx),
+          })
+          .collect();
+        Self::Object { id, entries }
+      },
+    }
+  }
+
   /// Convert a [`serde_json::Value`] into a `SerializedValue`, covering
   /// the JSON subset of JS types: `null` → `{v: null}`, `bool`,
   /// finite `number`, `string`, `Array`, `Object`. `ctx` supplies
@@ -829,29 +859,190 @@ impl<'de> Visitor<'de> for SerializedValueVisitor {
   }
 
   fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
-    // Playwright's tagged objects always have either one primary key
-    // (plus `id` companion for `a` / `o`). We collect the raw key/value
-    // pairs into a `serde_json::Map` first, then dispatch on the
-    // primary tag. This keeps the impl compact at the cost of one
-    // extra allocation per object — cheap compared to the wire-
-    // decoding cost.
-    let mut bag = serde_json::Map::new();
-    while let Some((k, v)) = map.next_entry::<String, serde_json::Value>()? {
-      bag.insert(k, v);
+    // Stream directly into typed fields without materializing an intermediate
+    // `serde_json::Map` / `serde_json::Value` tree. Each nested array/object
+    // is decoded once in a single pass rather than re-parsed at every depth.
+    let mut primary: Option<(u8, SerializedValue)> = None;
+    let mut array: Option<Vec<SerializedValue>> = None;
+    let mut object: Option<Vec<PropertyEntry>> = None;
+    let mut id: Option<u32> = None;
+    let mut ap_number: Option<String> = None;
+    let mut key_count: usize = 0;
+    let mut unknown_keys: Vec<String> = Vec::new();
+
+    let mut set_primary = |prio: u8, val: SerializedValue| {
+      if primary.as_ref().is_none_or(|(p, _)| prio < *p) {
+        primary = Some((prio, val));
+      }
+    };
+
+    while let Some(key) = map.next_key::<TagKey>()? {
+      key_count += 1;
+      match key {
+        TagKey::Ref => {
+          let raw = map.next_value::<u64>()?;
+          let ref_id = u32::try_from(raw).map_err(|e| de::Error::custom(DecodeError::IdRange(e)))?;
+          set_primary(0, SerializedValue::Reference(ref_id));
+        },
+        TagKey::V => {
+          let special = map.next_value::<SpecialValue>()?;
+          set_primary(1, SerializedValue::Special(special));
+        },
+        TagKey::D => set_primary(2, SerializedValue::Date(map.next_value::<String>()?)),
+        TagKey::U => set_primary(3, SerializedValue::Url(map.next_value::<String>()?)),
+        TagKey::Bi => set_primary(4, SerializedValue::BigInt(map.next_value::<String>()?)),
+        TagKey::E => set_primary(5, SerializedValue::Error(map.next_value::<ErrorValue>()?)),
+        TagKey::R => set_primary(6, SerializedValue::RegExp(map.next_value::<RegExpValue>()?)),
+        TagKey::A => {
+          array = Some(map.next_value::<Vec<SerializedValue>>()?);
+        },
+        TagKey::O => {
+          object = Some(map.next_value::<Vec<PropertyEntry>>()?);
+        },
+        TagKey::Id => {
+          let raw = map.next_value::<u64>()?;
+          id = Some(u32::try_from(raw).map_err(|e| de::Error::custom(DecodeError::IdRange(e)))?);
+        },
+        TagKey::H => {
+          let raw = map.next_value::<u64>()?;
+          let idx = u32::try_from(raw).map_err(|e| de::Error::custom(DecodeError::IdRange(e)))?;
+          set_primary(9, SerializedValue::Handle(idx));
+        },
+        TagKey::Fn => set_primary(10, SerializedValue::Function(map.next_value::<String>()?)),
+        TagKey::Ta => set_primary(11, SerializedValue::TypedArray(map.next_value::<TypedArrayValue>()?)),
+        TagKey::Ab => set_primary(12, SerializedValue::ArrayBuffer(map.next_value::<ArrayBufferValue>()?)),
+        TagKey::ApNumber => {
+          ap_number = Some(map.next_value::<String>()?);
+        },
+        TagKey::Unknown(name) => {
+          let _ = map.next_value::<de::IgnoredAny>()?;
+          unknown_keys.push(name);
+        },
+      }
     }
+
     // `serde_json`'s `arbitrary_precision` feature (force-enabled
     // workspace-wide by a transitive dep) makes a bare JSON number
     // reach a `deserialize_any` visitor as a one-key map
     // `{"$serde_json::private::Number": "<literal>"}` instead of
     // `visit_f64`. Decode that back to a number before tag dispatch so
     // the wire stays AP-agnostic.
-    if bag.len() == 1
-      && let Some(serde_json::Value::String(lit)) = bag.get(AP_NUMBER_SENTINEL)
+    if key_count == 1
+      && let Some(ref lit) = ap_number
       && let Ok(n) = lit.parse::<f64>()
     {
       return Ok(SerializedValue::Number(n));
     }
-    decode_tagged_object(bag).map_err(de::Error::custom)
+
+    // Tag precedence mirrors Playwright's `parseEvaluationResultValue`:
+    // `ref` (0) > `v` (1) > `d`..`r` (2..=6) > `a` (7) > `o` (8) > `h`..`ab` (9..=12).
+    if let Some((prio, val)) = primary {
+      if prio < 7 {
+        return Ok(val);
+      }
+      if let Some(items) = array {
+        let id = id.ok_or_else(|| de::Error::custom(DecodeError::tag("a", "must be paired with numeric id")))?;
+        return Ok(SerializedValue::Array { id, items });
+      }
+      if let Some(entries) = object {
+        let id = id.ok_or_else(|| de::Error::custom(DecodeError::tag("o", "must be paired with numeric id")))?;
+        return Ok(SerializedValue::Object { id, entries });
+      }
+      return Ok(val);
+    }
+    if let Some(items) = array {
+      let id = id.ok_or_else(|| de::Error::custom(DecodeError::tag("a", "must be paired with numeric id")))?;
+      return Ok(SerializedValue::Array { id, items });
+    }
+    if let Some(entries) = object {
+      let id = id.ok_or_else(|| de::Error::custom(DecodeError::tag("o", "must be paired with numeric id")))?;
+      return Ok(SerializedValue::Object { id, entries });
+    }
+    if id.is_some() {
+      unknown_keys.push("id".to_string());
+    }
+    if ap_number.is_some() {
+      unknown_keys.push(AP_NUMBER_SENTINEL.to_string());
+    }
+    Err(de::Error::custom(DecodeError::UnknownShape(unknown_keys)))
+  }
+}
+
+/// Zero-allocation map key identifier for [`SerializedValueVisitor::visit_map`].
+enum TagKey {
+  Ref,
+  V,
+  D,
+  U,
+  Bi,
+  E,
+  R,
+  A,
+  O,
+  Id,
+  H,
+  Fn,
+  Ta,
+  Ab,
+  ApNumber,
+  Unknown(String),
+}
+
+impl<'de> Deserialize<'de> for TagKey {
+  fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+    struct TagKeyVisitor;
+
+    impl Visitor<'_> for TagKeyVisitor {
+      type Value = TagKey;
+
+      fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("a SerializedValue wire tag key")
+      }
+
+      fn visit_str<E: de::Error>(self, v: &str) -> Result<Self::Value, E> {
+        Ok(match v {
+          "ref" => TagKey::Ref,
+          "v" => TagKey::V,
+          "d" => TagKey::D,
+          "u" => TagKey::U,
+          "bi" => TagKey::Bi,
+          "e" => TagKey::E,
+          "r" => TagKey::R,
+          "a" => TagKey::A,
+          "o" => TagKey::O,
+          "id" => TagKey::Id,
+          "h" => TagKey::H,
+          "fn" => TagKey::Fn,
+          "ta" => TagKey::Ta,
+          "ab" => TagKey::Ab,
+          AP_NUMBER_SENTINEL => TagKey::ApNumber,
+          other => TagKey::Unknown(other.to_string()),
+        })
+      }
+
+      fn visit_string<E: de::Error>(self, v: String) -> Result<Self::Value, E> {
+        match v.as_str() {
+          "ref" => Ok(TagKey::Ref),
+          "v" => Ok(TagKey::V),
+          "d" => Ok(TagKey::D),
+          "u" => Ok(TagKey::U),
+          "bi" => Ok(TagKey::Bi),
+          "e" => Ok(TagKey::E),
+          "r" => Ok(TagKey::R),
+          "a" => Ok(TagKey::A),
+          "o" => Ok(TagKey::O),
+          "id" => Ok(TagKey::Id),
+          "h" => Ok(TagKey::H),
+          "fn" => Ok(TagKey::Fn),
+          "ta" => Ok(TagKey::Ta),
+          "ab" => Ok(TagKey::Ab),
+          AP_NUMBER_SENTINEL => Ok(TagKey::ApNumber),
+          _ => Ok(TagKey::Unknown(v)),
+        }
+      }
+    }
+
+    d.deserialize_identifier(TagKeyVisitor)
   }
 }
 
@@ -871,8 +1062,6 @@ enum DecodeError {
   },
   #[error("id companion out of range: {0}")]
   IdRange(#[from] std::num::TryFromIntError),
-  #[error("nested decode: {0}")]
-  Nested(#[from] serde_json::Error),
   #[error("no recognised tag in object (keys: {0:?})")]
   UnknownShape(Vec<std::string::String>),
 }
@@ -884,91 +1073,6 @@ impl DecodeError {
       reason: reason.into(),
     }
   }
-}
-
-fn decode_tagged_object(mut bag: serde_json::Map<String, serde_json::Value>) -> Result<SerializedValue, DecodeError> {
-  // The tag precedence mirrors Playwright's own deserializer
-  // (`ref` > `v` > rich types > `a` / `o` > `h` > typed / array
-  // buffer). See
-  // `/tmp/playwright/packages/injected/src/utilityScriptSerializers.ts:124`.
-  if let Some(v) = bag.remove("ref") {
-    let id = v
-      .as_u64()
-      .ok_or_else(|| DecodeError::tag("ref", format!("must be a u64, got {v}")))?;
-    return Ok(SerializedValue::Reference(u32::try_from(id)?));
-  }
-  if let Some(v) = bag.remove("v") {
-    let special: SpecialValue = serde_json::from_value(v)?;
-    return Ok(SerializedValue::Special(special));
-  }
-  if let Some(v) = bag.remove("d") {
-    let iso = v
-      .as_str()
-      .ok_or_else(|| DecodeError::tag("d", "must be string"))?
-      .to_string();
-    return Ok(SerializedValue::Date(iso));
-  }
-  if let Some(v) = bag.remove("u") {
-    let s = v
-      .as_str()
-      .ok_or_else(|| DecodeError::tag("u", "must be string"))?
-      .to_string();
-    return Ok(SerializedValue::Url(s));
-  }
-  if let Some(v) = bag.remove("bi") {
-    let s = v
-      .as_str()
-      .ok_or_else(|| DecodeError::tag("bi", "must be string"))?
-      .to_string();
-    return Ok(SerializedValue::BigInt(s));
-  }
-  if let Some(v) = bag.remove("e") {
-    let e: ErrorValue = serde_json::from_value(v)?;
-    return Ok(SerializedValue::Error(e));
-  }
-  if let Some(v) = bag.remove("r") {
-    let r: RegExpValue = serde_json::from_value(v)?;
-    return Ok(SerializedValue::RegExp(r));
-  }
-  if let Some(v) = bag.remove("a") {
-    let items: Vec<SerializedValue> = serde_json::from_value(v)?;
-    let id = bag
-      .remove("id")
-      .and_then(|v| v.as_u64())
-      .ok_or_else(|| DecodeError::tag("a", "must be paired with numeric id"))?;
-    return Ok(SerializedValue::Array {
-      id: u32::try_from(id)?,
-      items,
-    });
-  }
-  if let Some(v) = bag.remove("o") {
-    let entries: Vec<PropertyEntry> = serde_json::from_value(v)?;
-    let id = bag
-      .remove("id")
-      .and_then(|v| v.as_u64())
-      .ok_or_else(|| DecodeError::tag("o", "must be paired with numeric id"))?;
-    return Ok(SerializedValue::Object {
-      id: u32::try_from(id)?,
-      entries,
-    });
-  }
-  if let Some(v) = bag.remove("h") {
-    let idx = v.as_u64().ok_or_else(|| DecodeError::tag("h", "must be u64"))?;
-    return Ok(SerializedValue::Handle(u32::try_from(idx)?));
-  }
-  if let Some(v) = bag.remove("fn") {
-    let name = v.as_str().ok_or_else(|| DecodeError::tag("fn", "must be a string"))?;
-    return Ok(SerializedValue::Function(name.to_string()));
-  }
-  if let Some(v) = bag.remove("ta") {
-    let ta: TypedArrayValue = serde_json::from_value(v)?;
-    return Ok(SerializedValue::TypedArray(ta));
-  }
-  if let Some(v) = bag.remove("ab") {
-    let ab: ArrayBufferValue = serde_json::from_value(v)?;
-    return Ok(SerializedValue::ArrayBuffer(ab));
-  }
-  Err(DecodeError::UnknownShape(bag.keys().cloned().collect()))
 }
 
 // ── SerializationContext ────────────────────────────────────────────────────
@@ -1002,7 +1106,7 @@ pub fn argument_from_serde<A: serde::Serialize + ?Sized>(arg: &A) -> crate::erro
   let json = serde_json::to_value(arg).map_err(|e| crate::error::FerriError::Json(format!("eval argument: {e}")))?;
   let mut ctx = SerializationContext::default();
   Ok(SerializedArgument {
-    value: SerializedValue::from_json(&json, &mut ctx),
+    value: SerializedValue::from_json_owned(json, &mut ctx),
     handles: Vec::new(),
     functions: Vec::new(),
   })
@@ -1532,6 +1636,32 @@ mod tests {
       err.to_string().contains("no recognised tag"),
       "unexpected error message: {err}"
     );
+  }
+
+  #[test]
+  fn deserializes_id_before_collection_and_rejects_missing_id() {
+    let from_str = serde_json::from_str::<SerializedValue>(r#"{"id":7,"a":[1,{"id":8,"o":[{"k":"x","v":"ok"}]}]}"#)
+      .expect("id before collection");
+    assert_eq!(
+      from_str,
+      SerializedValue::Array {
+        id: 7,
+        items: vec![
+          SerializedValue::Number(1.0),
+          SerializedValue::Object {
+            id: 8,
+            entries: vec![PropertyEntry {
+              k: "x".into(),
+              v: SerializedValue::Str("ok".into()),
+            }],
+          },
+        ],
+      }
+    );
+    let err = serde_json::from_str::<SerializedValue>(r#"{"a":[1,2]}"#).unwrap_err();
+    assert!(err.to_string().contains("must be paired with numeric id"), "{err}");
+    let err = serde_json::from_str::<SerializedValue>(r#"{"id":1}"#).unwrap_err();
+    assert!(err.to_string().contains("no recognised tag"), "{err}");
   }
 
   // ── Round-trip ──────────────────────────────────────────────────────────
