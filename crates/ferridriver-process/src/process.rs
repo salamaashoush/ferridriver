@@ -848,7 +848,7 @@ mod job {
   use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_SET_QUOTA, PROCESS_TERMINATE};
 
   /// A job's handle, held as its address so the type is `Send`.
-  pub struct ProcessJob(usize);
+  pub(super) struct ProcessJob(usize);
 
   impl ProcessJob {
     fn handle(&self) -> HANDLE {
@@ -917,7 +917,7 @@ mod job {
       unsafe_code,
       reason = "Job Objects are reachable only through the Win32 FFI in windows-sys"
     )]
-    pub fn terminate(&self) -> std::io::Result<()> {
+    pub(super) fn terminate(&self) -> std::io::Result<()> {
       // SAFETY: the handle is a live job this value owns.
       if unsafe { TerminateJobObject(self.handle(), 1) } == 0 {
         return Err(std::io::Error::last_os_error());
@@ -957,7 +957,7 @@ mod job {
     /// only starts the kills, and a process it ended keeps its files open
     /// until it is gone: a Firefox content process still holding the
     /// profile makes deleting it fail with a sharing violation.
-    pub async fn until_empty(&self, limit: std::time::Duration) -> std::io::Result<()> {
+    pub(super) async fn until_empty(&self, limit: std::time::Duration) -> std::io::Result<()> {
       let deadline = std::time::Instant::now() + limit;
       while self.active_processes()? > 0 {
         if std::time::Instant::now() >= deadline {
@@ -1006,7 +1006,7 @@ mod job {
   }
 
   /// Put `pid` in a job the instant it is spawned.
-  pub fn track(pid: u32) {
+  pub(super) fn track(pid: u32) {
     let mut pending = pending().lock().unwrap_or_else(PoisonError::into_inner);
     if !pending.contains_key(&pid)
       && let Some(job) = ProcessJob::holding(pid)
@@ -1016,7 +1016,7 @@ mod job {
   }
 
   /// The job `track` made for `pid`, or a new one.
-  pub fn claim(pid: u32) -> Option<ProcessJob> {
+  pub(super) fn claim(pid: u32) -> Option<ProcessJob> {
     if pid == 0 {
       return None;
     }
