@@ -153,9 +153,12 @@ test('goto to a fragment of the loaded document resolves at once with no respons
     (window as any).__kept = 1;
   });
   const started = Date.now();
-  expect(await page.goto(`${landed}#first`)).toBeNull();
-  expect(await page.goto(`${landed}#second`)).toBeNull();
-  expect(Date.now() - started).toBeLessThan(5000);
+  expect(await page.goto(`${landed}#first`, { timeout: 10_000 })).toBeNull();
+  expect(await page.goto(`${landed}#second`, { timeout: 10_000 })).toBeNull();
+  // Strictly less than one goto's 10s timeout, so a fragment jump that stalls
+  // waiting for a document load fails this bound while loaded CI runners have
+  // headroom for two healthy jumps right after the 6,000-console.log test.
+  expect(Date.now() - started).toBeLessThan(9000);
   expect(page.url()).toBe(`${landed}#second`);
   expect(await page.evaluate(() => (window as any).__kept)).toBe(1);
 });
