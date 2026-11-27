@@ -1,6 +1,10 @@
 import { inflateSync } from 'node:zlib';
 import { test, expect } from '@ferridriver/test';
 
+// Each case bursts 16 simultaneous 1280x720 captures; serialize them against
+// each other and against screenshot-assertion-options.test.ts on small CI VMs.
+test.describe.configure({ lock: 'heavy-screenshot' });
+
 function firstPixel(bytes: Uint8Array): number[] {
   const png = Uint8Array.from(bytes);
   const view = new DataView(png.buffer, png.byteOffset, png.byteLength);

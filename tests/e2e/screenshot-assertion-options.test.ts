@@ -16,6 +16,13 @@ function u32(bytes: number[] | Uint8Array, at: number): number {
 }
 
 describe('toHaveScreenshot capture options', () => {
+  // Every subject in this suite fits inside 100x100 (fullPage and timeout
+  // tests set their own viewports). Keeping the viewport compact and sharing
+  // a lock with screenshot-first-capture.test.ts prevents 16 concurrent
+  // 1280x720 software-raster captures from stalling baseline writes on CI.
+  describe.configure({ lock: 'heavy-screenshot' });
+  test.use({ viewport: { width: 200, height: 200 } });
+
   test('a mask covers the region it names on a page subject', async ({ page }) => {
     await page.setContent(
       '<style>body{margin:0;background:#ffffff}#box{width:80px;height:80px;background:#123456}</style>' +

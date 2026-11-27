@@ -8,6 +8,10 @@ import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { runOnceAcrossProjects } from './helpers/projects';
 
+// Each test launches its own standalone browser; keep them from cold-starting
+// four Chromium instances simultaneously on 3-vCPU macOS CI runners.
+test.describe.configure({ lock: 'browser-launch' });
+
 function launch(browserName: string): Promise<Browser> {
   const factory = browserName === 'firefox' ? firefox() : browserName === 'webkit' ? webkit() : chromium();
   return factory.launch({ headless: true });
