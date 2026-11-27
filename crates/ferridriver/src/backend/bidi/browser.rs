@@ -14,7 +14,8 @@ use crate::backend::{AnyPage, NavLifecycle};
 use crate::error::{FerriError, Result};
 
 /// The blocked requests of each popup, by its top-level context.
-type PopupRequests = rustc_hash::FxHashMap<String, tokio::sync::mpsc::UnboundedSender<super::transport::BidiEvent>>;
+type PopupRequests =
+  rustc_hash::FxHashMap<String, tokio::sync::mpsc::UnboundedSender<Arc<super::transport::BidiEvent>>>;
 
 /// What the popup listener needs to turn a top-level context the browser
 /// opened into a popup the pump registers.
@@ -521,7 +522,7 @@ impl BidiBrowser {
     session: &Arc<BidiSession>,
     popups: &PopupRequests,
     parents: &rustc_hash::FxHashMap<String, String>,
-    event: super::transport::BidiEvent,
+    event: Arc<super::transport::BidiEvent>,
   ) {
     if event.params.get("isBlocked").and_then(serde_json::Value::as_bool) != Some(true) {
       return;

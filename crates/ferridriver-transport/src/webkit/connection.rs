@@ -319,7 +319,22 @@ impl Connection {
     match routes.entry(key).or_insert_with(|| Route::Buffering(Vec::new())) {
       Route::Buffering(buf) => buf.push(env),
       Route::Live(txs) => {
-        txs.retain(|tx| tx.send(env.clone()).is_ok());
+        // Common case: a single subscriber per target route. Move `env`
+        // directly instead of deep-cloning its JSON payload.
+        if txs.len() == 1 {
+          if txs[0].send(env).is_err() {
+            txs.clear();
+          }
+        } else if !txs.is_empty() {
+          let last = txs.len() - 1;
+          let mut pending = Some(env);
+          let mut idx = 0;
+          txs.retain(|tx| {
+            let item = if idx == last { pending.take() } else { pending.clone() };
+            idx += 1;
+            item.is_some_and(|e| tx.send(e).is_ok())
+          });
+        }
       },
     }
   }

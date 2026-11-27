@@ -52,11 +52,29 @@ impl CdpDispatcher {
     lock_or_recover(&self.session_dirty).remove(session_id);
   }
 
+  fn mark_session_dirty(&self, session_id: &str, pointer: bool, network: bool, session_state: bool) {
+    if !pointer && !network && !session_state {
+      return;
+    }
+    let mut map = lock_or_recover(&self.session_dirty);
+    if let Some(flags) = map.get_mut(session_id) {
+      flags.pointer |= pointer;
+      flags.network |= network;
+      flags.session_state |= session_state;
+    } else {
+      map.insert(
+        session_id.to_string(),
+        SessionDirty {
+          pointer,
+          session_state,
+          network,
+        },
+      );
+    }
+  }
+
   pub(crate) fn mark_pointer_dirty(&self, session_id: &str) {
-    lock_or_recover(&self.session_dirty)
-      .entry(session_id.to_string())
-      .or_default()
-      .pointer = true;
+    self.mark_session_dirty(session_id, true, false, false);
   }
 
   pub(crate) fn take_permissions_dirty(&self, browser_context_id: &str) -> bool {
@@ -397,13 +415,7 @@ impl CdpDispatcher {
       ) || (method == "Page.navigate"
         && json_scan::json_string(json_scan::json_field(params_bytes, b"url")) != b"about:blank");
       let session_state = !is_clean_session_command(method);
-      if pointer || network || session_state {
-        let mut map = lock_or_recover(&self.session_dirty);
-        let flags = map.entry(sid.to_string()).or_default();
-        flags.pointer |= pointer;
-        flags.network |= network;
-        flags.session_state |= session_state;
-      }
+      self.mark_session_dirty(sid, pointer, network, session_state);
     }
   }
 
@@ -452,13 +464,7 @@ impl CdpDispatcher {
       ) || (method == "Page.navigate"
         && params.get("url").and_then(serde_json::Value::as_str) != Some("about:blank"));
       let session_state = !is_clean_session_command(method);
-      if pointer || network || session_state {
-        let mut map = lock_or_recover(&self.session_dirty);
-        let flags = map.entry(sid.to_string()).or_default();
-        flags.pointer |= pointer;
-        flags.network |= network;
-        flags.session_state |= session_state;
-      }
+      self.mark_session_dirty(sid, pointer, network, session_state);
     }
     let id = self.next_id.fetch_add(1, Ordering::Relaxed);
     let mut data = Vec::with_capacity(128 + method.len() + session_id.map_or(0, str::len));
@@ -512,13 +518,7 @@ impl CdpDispatcher {
         "Network.setCookie" | "Network.setCookies" | "Storage.setCookies" | "Page.reload" | "Page.navigate"
       );
       let session_state = !is_clean_session_command(method);
-      if pointer || network || session_state {
-        let mut map = lock_or_recover(&self.session_dirty);
-        let flags = map.entry(sid.to_string()).or_default();
-        flags.pointer |= pointer;
-        flags.network |= network;
-        flags.session_state |= session_state;
-      }
+      self.mark_session_dirty(sid, pointer, network, session_state);
     }
     let id = self.next_id.fetch_add(1, Ordering::Relaxed);
     let mut data = Vec::with_capacity(64 + method.len() + raw_params_json.len() + session_id.map_or(0, str::len));
@@ -636,16 +636,10 @@ impl CdpDispatcher {
 
     if !sid_str.is_empty() {
       if method_str == "Network.requestWillBeSent" {
-        lock_or_recover(&self.session_dirty)
-          .entry(sid_str.to_string())
-          .or_default()
-          .network = true;
+        self.mark_session_dirty(sid_str, false, true, false);
       } else if method_str == "Target.attachedToTarget" {
         // Out-of-process iframe or child target attached under this session.
-        lock_or_recover(&self.session_dirty)
-          .entry(sid_str.to_string())
-          .or_default()
-          .session_state = true;
+        self.mark_session_dirty(sid_str, false, false, true);
       }
     }
 

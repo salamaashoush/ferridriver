@@ -68,12 +68,17 @@ pub fn parse_groups(payload: &str) -> Result<Vec<PageToolGroup>> {
 /// [`FerriError::Backend`] when the page returned something other than
 /// the shape it was asked for, and the tool's own error where it threw.
 pub fn parse_result(payload: &str) -> Result<serde_json::Value> {
-  let value: serde_json::Value =
+  let mut value: serde_json::Value =
     serde_json::from_str(payload).map_err(|e| FerriError::backend(format!("page tool result was unreadable: {e}")))?;
   if let Some(message) = value.get("error").and_then(serde_json::Value::as_str) {
     return Err(FerriError::backend(format!("page tool failed: {message}")));
   }
-  Ok(value.get("result").cloned().unwrap_or(serde_json::Value::Null))
+  Ok(
+    value
+      .as_object_mut()
+      .and_then(|obj| obj.remove("result"))
+      .unwrap_or(serde_json::Value::Null),
+  )
 }
 
 /// The dispatch, and the `window.__dtmcp` surface it leaves behind.

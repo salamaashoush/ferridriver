@@ -470,7 +470,7 @@ impl Driver {
         if read.read_exact(&mut message).await.is_err() {
           break;
         }
-        let Ok(response) = serde_json::from_slice::<serde_json::Value>(&message) else {
+        let Ok(mut response) = serde_json::from_slice::<serde_json::Value>(&message) else {
           continue;
         };
         let Some(id) = response.get("id").and_then(serde_json::Value::as_u64) else {
@@ -483,7 +483,12 @@ impl Driver {
         if let Some(waiting) = waiting {
           let outcome = match response.get("error").and_then(serde_json::Value::as_str) {
             Some(error) => Err(error.to_owned()),
-            None => Ok(response.get("result").cloned().unwrap_or(serde_json::Value::Null)),
+            None => Ok(
+              response
+                .as_object_mut()
+                .and_then(|obj| obj.remove("result"))
+                .unwrap_or(serde_json::Value::Null),
+            ),
           };
           let _ = waiting.send(outcome);
         }
