@@ -46,13 +46,11 @@ pub(crate) fn build_evaluate_argument(
 pub struct Page {
   pub(super) inner: Arc<ferridriver::Page>,
   pub(super) mouse_position: Arc<Mutex<(f64, f64)>>,
-  pub(super) predicate_routes: Arc<Mutex<Vec<PredRoute>>>,
   /// `page.on`/`page.once` registrations, kept so `off(event, listener)`
   /// can resolve the core `ListenerId` from the JS function identity.
   pub(super) listener_regs: crate::emitter::ListenerRegistry<events::PageWaitForEventResult>,
-  /// `page.route` registrations, kept so `unroute(url, handler)` can
-  /// resolve the core handler identity from the JS function identity.
-  route_regs: Arc<Mutex<Vec<network::RouteReg>>>,
+  /// `page.route` predicate and handler-identity registrations.
+  pub(super) routes: crate::route_registry::RouteRegistry,
 }
 
 impl Page {
@@ -60,9 +58,8 @@ impl Page {
     Self {
       inner,
       mouse_position: Arc::new(Mutex::new((0.0, 0.0))),
-      predicate_routes: Arc::new(Mutex::new(Vec::new())),
       listener_regs: crate::emitter::ListenerRegistry::new(),
-      route_regs: Arc::new(Mutex::new(Vec::new())),
+      routes: crate::route_registry::RouteRegistry::new(),
     }
   }
 

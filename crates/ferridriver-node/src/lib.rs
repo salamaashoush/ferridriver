@@ -46,6 +46,7 @@ mod macros;
 mod network;
 mod page;
 mod route;
+mod route_registry;
 mod selectors;
 mod serialize_out;
 mod tracing;
