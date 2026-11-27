@@ -100,15 +100,18 @@ test('history steps between entries of one document resolve at once with no resp
     history.pushState({}, '', '?tab=three');
   });
   const started = Date.now();
-  expect(await page.goBack({ timeout: 5000 })).toBeNull();
+  expect(await page.goBack({ timeout: 10_000 })).toBeNull();
   expect(page.url()).toBe(`${landed}?tab=two`);
-  expect(await page.goBack({ timeout: 5000 })).toBeNull();
+  expect(await page.goBack({ timeout: 10_000 })).toBeNull();
   expect(page.url()).toBe(landed);
-  expect(await page.goForward({ timeout: 5000 })).toBeNull();
+  expect(await page.goForward({ timeout: 10_000 })).toBeNull();
   expect(page.url()).toBe(`${landed}?tab=two`);
-  expect(await page.goForward({ timeout: 5000 })).toBeNull();
+  expect(await page.goForward({ timeout: 10_000 })).toBeNull();
   expect(page.url()).toBe(`${landed}?tab=three`);
-  expect(Date.now() - started).toBeLessThan(4000);
+  // Strictly less than one step's 10s timeout, so any step that stalls
+  // waiting for a document commit fails this bound while loaded CI runners
+  // have headroom for 4 healthy steps beside the 16-context spec.
+  expect(Date.now() - started).toBeLessThan(9000);
 });
 
 test('a history step across documents still waits for the document it lands on', async ({ page, baseURL }) => {

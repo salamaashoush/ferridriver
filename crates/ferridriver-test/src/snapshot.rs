@@ -808,7 +808,11 @@ where
       tokio::time::sleep(std::time::Duration::from_millis(wait)).await;
     }
     let previous = actual.take();
-    actual = match capture().await {
+    let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+    let Ok(captured) = tokio::time::timeout(remaining, capture()).await else {
+      return Ok(timed_out_screenshot(intermediate, previous, measure, timeout));
+    };
+    actual = match captured {
       Ok(bytes) => Some(bytes),
       // A closed page, or a capture the engine refuses outright, cannot
       // succeed on a retry.
@@ -1533,5 +1537,33 @@ mod tests {
     );
     assert_eq!(updated.comparison.as_ref().unwrap().status, SnapshotStatus::Updated);
     assert_eq!(attached_bytes(&updated, "value-expected.txt"), b"one");
+  }
+
+  #[tokio::test]
+  async fn stalled_capture_is_bounded_by_timeout() {
+    let dir = scratch("stalled-capture");
+    let baseline = dir.join("snaps/stalled.png");
+    std::fs::create_dir_all(baseline.parent().unwrap()).unwrap();
+    std::fs::write(&baseline, solid(RED)).unwrap();
+    let files = ScreenshotFiles::new(baseline, &dir.join("out/stalled.png"), "stalled.png".into());
+    let started = std::time::Instant::now();
+    let judged = judge_screenshot(
+      &files,
+      &crate::expect::ScreenshotMatcherOptions::default(),
+      UpdateSnapshotsMode::None,
+      false,
+      Duration::from_millis(120),
+      || async {
+        tokio::time::sleep(Duration::from_secs(10)).await;
+        Ok(solid(BLUE))
+      },
+    )
+    .await;
+    assert!(judged.result.is_err());
+    assert!(
+      started.elapsed() < Duration::from_secs(2),
+      "stalled capture overran timeout: {:?}",
+      started.elapsed()
+    );
   }
 }
