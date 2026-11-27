@@ -517,23 +517,25 @@ pub struct WebSocket {
   pub(crate) inner: CoreWebSocket,
   /// `on` / `once` registrations, so `off(event, listener)` finds the
   /// core listener from JS function identity.
-  listener_regs: Arc<std::sync::Mutex<Vec<WebSocketListenerReg>>>,
-}
-
-struct WebSocketListenerReg {
-  event: String,
-  id: u64,
-  fn_ref: FunctionRef<WebSocketEventArg, ()>,
+  listener_regs: crate::emitter::ListenerRegistry<WebSocketEventArg>,
 }
 
 impl WebSocket {
   pub(crate) fn from_core(inner: CoreWebSocket) -> Self {
     Self {
       inner,
-      listener_regs: Arc::new(std::sync::Mutex::new(Vec::new())),
+      listener_regs: crate::emitter::ListenerRegistry::new(),
     }
   }
 }
+
+crate::macros::napi_event_emitter!(
+  target: WebSocket,
+  arg: WebSocketEventArg,
+  ts_on: "event: 'framesent' | 'framereceived' | 'socketerror' | 'close', listener: (data: { payload: string | Buffer } | string | WebSocket) => void",
+  ts_off: "event: 'framesent' | 'framereceived' | 'socketerror' | 'close', listener?: (data: { payload: string | Buffer } | string | WebSocket) => void",
+  basic_events
+);
 
 /// Playwright's `{ payload: string | Buffer }` for `'framesent'` and
 /// `'framereceived'`.
@@ -582,10 +584,6 @@ impl ToNapiValue for WebSocketEventArg {
 }
 
 #[napi]
-#[expect(
-  clippy::needless_pass_by_value,
-  reason = "napi-derive takes JS strings, functions and option bags only by value"
-)]
 impl WebSocket {
   /// Mirrors Playwright `webSocket.url(): string`.
   #[napi]
@@ -597,102 +595,6 @@ impl WebSocket {
   #[napi]
   pub fn is_closed(&self) -> bool {
     self.inner.is_closed()
-  }
-
-  /// Playwright: `webSocket.on(event, listener)`; returns the socket so
-  /// registrations chain.
-  #[napi(
-    ts_args_type = "event: 'framesent' | 'framereceived' | 'socketerror' | 'close', listener: (data: { payload: string | Buffer } | string | WebSocket) => void",
-    ts_return_type = "this"
-  )]
-  pub fn on<'env>(
-    &self,
-    this: This<'env>,
-    event: String,
-    listener: Function<'_, WebSocketEventArg, ()>,
-  ) -> Result<Object<'env>> {
-    self.register_listener(&event, &listener, false)?;
-    Ok(this.object)
-  }
-
-  /// Node's `addListener`, an alias of [`Self::on`].
-  #[napi(
-    ts_args_type = "event: 'framesent' | 'framereceived' | 'socketerror' | 'close', listener: (data: { payload: string | Buffer } | string | WebSocket) => void",
-    ts_return_type = "this"
-  )]
-  pub fn add_listener<'env>(
-    &self,
-    this: This<'env>,
-    event: String,
-    listener: Function<'_, WebSocketEventArg, ()>,
-  ) -> Result<Object<'env>> {
-    self.on(this, event, listener)
-  }
-
-  /// One-shot [`Self::on`].
-  #[napi(
-    ts_args_type = "event: 'framesent' | 'framereceived' | 'socketerror' | 'close', listener: (data: { payload: string | Buffer } | string | WebSocket) => void",
-    ts_return_type = "this"
-  )]
-  pub fn once<'env>(
-    &self,
-    this: This<'env>,
-    event: String,
-    listener: Function<'_, WebSocketEventArg, ()>,
-  ) -> Result<Object<'env>> {
-    self.register_listener(&event, &listener, true)?;
-    Ok(this.object)
-  }
-
-  /// Remove `listener` from `event`, or every listener of `event`.
-  #[napi(
-    ts_args_type = "event: 'framesent' | 'framereceived' | 'socketerror' | 'close', listener?: (data: { payload: string | Buffer } | string | WebSocket) => void",
-    ts_return_type = "this"
-  )]
-  pub fn off<'env>(
-    &self,
-    env: Env,
-    this: This<'env>,
-    event: String,
-    listener: Option<Function<'_, WebSocketEventArg, ()>>,
-  ) -> Result<Object<'env>> {
-    let mut regs = self
-      .listener_regs
-      .lock()
-      .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let Some(listener) = listener else {
-      self.inner.events().remove_listeners_named(&event);
-      regs.retain(|r| r.event != event);
-      return Ok(this.object);
-    };
-    let wanted = listener.create_ref()?;
-    let mut i = 0;
-    while i < regs.len() {
-      let hit =
-        regs[i].event == event && env.strict_equals(wanted.borrow_back(&env)?, regs[i].fn_ref.borrow_back(&env)?)?;
-      if hit {
-        let reg = regs.remove(i);
-        self.inner.events().off(ferridriver::events::ListenerId(reg.id));
-      } else {
-        i += 1;
-      }
-    }
-    Ok(this.object)
-  }
-
-  /// Node's `removeListener`, an alias of [`Self::off`].
-  #[napi(
-    ts_args_type = "event: 'framesent' | 'framereceived' | 'socketerror' | 'close', listener?: (data: { payload: string | Buffer } | string | WebSocket) => void",
-    ts_return_type = "this"
-  )]
-  pub fn remove_listener<'env>(
-    &self,
-    env: Env,
-    this: This<'env>,
-    event: String,
-    listener: Option<Function<'_, WebSocketEventArg, ()>>,
-  ) -> Result<Object<'env>> {
-    self.off(env, this, event, listener)
   }
 
   /// Playwright `webSocket.waitForEvent(event, optionsOrPredicate?)`:
@@ -801,15 +703,7 @@ impl WebSocket {
     } else {
       self.inner.events().on(event, callback)
     };
-    self
-      .listener_regs
-      .lock()
-      .unwrap_or_else(std::sync::PoisonError::into_inner)
-      .push(WebSocketListenerReg {
-        event: event.to_string(),
-        id: id.0,
-        fn_ref,
-      });
+    self.listener_regs.record(event, id.0, fn_ref);
     Ok(())
   }
 }

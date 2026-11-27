@@ -91,28 +91,20 @@ pub struct FetchOptions {
 /// Lower a Playwright `params` / `form` map through the ONE core
 /// implementation, so this binding and the `QuickJS` one cannot disagree
 /// about what a scalar bag means.
-fn scalar_map_to_pairs(field: &str, map: &FxHashMap<String, serde_json::Value>) -> Result<Vec<(String, String)>> {
-  ferridriver::http_client::RequestOptions::scalar_map_to_pairs(field, map.iter().map(|(k, v)| (k.clone(), v.clone())))
-    .map_err(napi::Error::from_reason)
+fn scalar_map_to_pairs(field: &str, map: FxHashMap<String, serde_json::Value>) -> Result<Vec<(String, String)>> {
+  ferridriver::http_client::RequestOptions::scalar_map_to_pairs(field, map).map_err(napi::Error::from_reason)
 }
 
 impl FetchOptions {
-  fn to_core(&self) -> Result<ferridriver::http_client::RequestOptions> {
-    let (data, json_data) = ferridriver::http_client::RequestOptions::split_data(self.data.clone(), None);
+  fn into_core(self) -> Result<ferridriver::http_client::RequestOptions> {
+    let (data, json_data) = ferridriver::http_client::RequestOptions::split_data(self.data, None);
     Ok(ferridriver::http_client::RequestOptions {
-      method: self.method.as_ref().map(|m| m.to_ascii_uppercase()),
-      headers: self
-        .headers
-        .as_ref()
-        .map(|h| h.iter().map(|(k, v)| (k.clone(), v.clone())).collect()),
+      method: self.method.map(|m| m.to_ascii_uppercase()),
+      headers: self.headers.map(|h| h.into_iter().collect()),
       json_data,
       data,
-      form: self.form.as_ref().map(|f| scalar_map_to_pairs("form", f)).transpose()?,
-      params: self
-        .params
-        .as_ref()
-        .map(|p| scalar_map_to_pairs("params", p))
-        .transpose()?,
+      form: self.form.map(|f| scalar_map_to_pairs("form", f)).transpose()?,
+      params: self.params.map(|p| scalar_map_to_pairs("params", p)).transpose()?,
       timeout: self
         .timeout
         .map(|t| std::time::Duration::from_millis(crate::types::f64_to_u64(t))),
@@ -129,11 +121,7 @@ impl FetchOptions {
       ignore_https_errors: self.ignore_https_errors,
       multipart: self
         .multipart
-        .as_ref()
-        .map(|m| {
-          ferridriver::http_client::MultipartField::from_json_map(m.iter().map(|(k, v)| (k.clone(), v.clone())))
-            .map_err(napi::Error::from_reason)
-        })
+        .map(|m| ferridriver::http_client::MultipartField::from_json_map(m).map_err(napi::Error::from_reason))
         .transpose()?,
       // The Node binding is the trusted Playwright-in-Rust surface, not
       // the script sandbox — no network guard is imposed here.
@@ -143,38 +131,6 @@ impl FetchOptions {
   }
 }
 
-/// Layer explicit `options` over a `Request`-derived base: anything the
-/// caller set wins, the rest falls through to the request's own values.
-/// Mirrors the `QuickJS` binding's `merge_over`.
-fn merge_over(
-  base: Option<ferridriver::http_client::RequestOptions>,
-  options: Option<ferridriver::http_client::RequestOptions>,
-) -> Option<ferridriver::http_client::RequestOptions> {
-  let (base, options) = match (base, options) {
-    (Some(base), Some(options)) => (base, options),
-    (base, options) => return base.or(options),
-  };
-  Some(ferridriver::http_client::RequestOptions {
-    method: options.method.or(base.method),
-    headers: match (options.headers, base.headers) {
-      (Some(explicit), Some(inherited)) => {
-        let mut merged = explicit;
-        for (name, value) in inherited {
-          if !merged.iter().any(|(k, _)| k.eq_ignore_ascii_case(&name)) {
-            merged.push((name, value));
-          }
-        }
-        Some(merged)
-      },
-      (explicit, inherited) => explicit.or(inherited),
-    },
-    data: options.data.or_else(|| {
-      (options.json_data.is_none() && options.form.is_none() && options.multipart.is_none()).then_some(base.data)?
-    }),
-    ..options
-  })
-}
-
 /// API response from an HTTP request.
 #[napi(js_name = "APIResponse")]
 pub struct HttpResponse {
@@ -182,13 +138,16 @@ pub struct HttpResponse {
 }
 
 /// What Playwright's `APIResponse` hands back as a promise and this
-/// response already holds: its body is buffered when it is made. An
-/// error rejects the promise, as a disposed body does upstream.
+/// response already holds: its body is buffered when it is made. Resolved
+/// or rejected synchronously on the JS thread without spawning a Tokio task.
 fn settled<T>(env: &napi::Env, value: Result<T>) -> Result<PromiseRaw<'_, T>>
 where
-  T: napi::bindgen_prelude::ToNapiValue + Send + 'static,
+  T: napi::bindgen_prelude::ToNapiValue,
 {
-  env.spawn_future(async move { value })
+  match value {
+    Ok(v) => PromiseRaw::resolve(env, v),
+    Err(err) => PromiseRaw::reject(env, err),
+  }
 }
 
 #[napi]
@@ -267,28 +226,23 @@ impl HttpResponse {
   /// Playwright: `apiResponse.headers(): { [key: string]: string }` —
   /// lowercased names, duplicates combined.
   #[napi(ts_return_type = "Record<string, string>")]
-  pub fn headers(&self) -> serde_json::Value {
-    let map: serde_json::Map<String, serde_json::Value> = self
-      .inner
-      .headers_object()
-      .into_iter()
-      .map(|(k, v)| (k, serde_json::Value::String(v)))
-      .collect();
-    serde_json::Value::Object(map)
+  pub fn headers(&self) -> crate::types::HashMap<String, String> {
+    self.inner.headers_object().into_iter().collect()
   }
 
   /// Playwright: `apiResponse.headersArray(): HeadersArray` — every
   /// header verbatim, duplicates and original casing preserved.
   #[napi(ts_return_type = "Array<{ name: string, value: string }>")]
-  pub fn headers_array(&self) -> serde_json::Value {
-    serde_json::Value::Array(
-      self
-        .inner
-        .headers()
-        .iter()
-        .map(|(name, value)| serde_json::json!({ "name": name, "value": value }))
-        .collect(),
-    )
+  pub fn headers_array(&self) -> Vec<crate::network::HeaderEntry> {
+    self
+      .inner
+      .headers()
+      .iter()
+      .map(|(name, value)| crate::network::HeaderEntry {
+        name: name.clone(),
+        value: value.clone(),
+      })
+      .collect()
   }
 
   /// Combined value of a single header, or `null` when absent.
@@ -352,20 +306,17 @@ pub fn new_context(env: &napi::Env, options: Option<HttpClientOptions>) -> Resul
 
 fn build_context(options: Option<HttpClientOptions>) -> Result<HttpClient> {
   let opts = options.unwrap_or_default();
+  if opts.client_certificates.is_some() {
+    return Err(crate::error::to_napi(ferridriver::error::FerriError::unsupported(
+      "clientCertificates is not supported for request.newContext yet",
+    )));
+  }
   let proxy = opts.proxy.map(|p| ferridriver::options::ProxyConfig {
     server: p.server,
     bypass: p.bypass,
     username: p.username,
     password: p.password,
   });
-  if let Some(proxy) = &proxy {
-    proxy.validate().into_napi()?;
-  }
-  if opts.client_certificates.is_some() {
-    return Err(crate::error::to_napi(ferridriver::error::FerriError::unsupported(
-      "clientCertificates is not supported for request.newContext yet",
-    )));
-  }
   let storage = opts
     .storage_state
     .map(|input| {
@@ -390,11 +341,17 @@ fn build_context(options: Option<HttpClientOptions>) -> Result<HttpClient> {
     max_redirects: opts.max_redirects,
     proxy,
   };
-  let mut client = ferridriver::http_client::HttpClient::new(core_opts);
-  if let Some(state) = storage {
-    client = client.with_storage_state(state).into_napi()?;
-  }
+  let client = ferridriver::http_client::HttpClient::try_new(core_opts, storage).into_napi()?;
   Ok(HttpClient::wrap(client))
+}
+
+impl HttpClient {
+  async fn send_verb(&self, method: &str, url: &str, options: Option<FetchOptions>) -> Result<HttpResponse> {
+    let mut opts = options.map(FetchOptions::into_core).transpose()?.unwrap_or_default();
+    opts.method = Some(method.to_string());
+    let resp = self.inner.fetch(url).options(opts).await.into_napi()?;
+    Ok(HttpResponse { inner: resp })
+  }
 }
 
 #[napi]
@@ -413,49 +370,37 @@ impl HttpClient {
   /// Send a GET request.
   #[napi]
   pub async fn get(&self, url: String, options: Option<FetchOptions>) -> Result<HttpResponse> {
-    let opts = options.map(|o| o.to_core()).transpose()?;
-    let resp = self.inner.get(&url).maybe_options(opts).await.into_napi()?;
-    Ok(HttpResponse { inner: resp })
+    self.send_verb("GET", &url, options).await
   }
 
   /// Send a POST request.
   #[napi]
   pub async fn post(&self, url: String, options: Option<FetchOptions>) -> Result<HttpResponse> {
-    let opts = options.map(|o| o.to_core()).transpose()?;
-    let resp = self.inner.post(&url).maybe_options(opts).await.into_napi()?;
-    Ok(HttpResponse { inner: resp })
+    self.send_verb("POST", &url, options).await
   }
 
   /// Send a PUT request.
   #[napi]
   pub async fn put(&self, url: String, options: Option<FetchOptions>) -> Result<HttpResponse> {
-    let opts = options.map(|o| o.to_core()).transpose()?;
-    let resp = self.inner.put(&url).maybe_options(opts).await.into_napi()?;
-    Ok(HttpResponse { inner: resp })
+    self.send_verb("PUT", &url, options).await
   }
 
   /// Send a DELETE request.
   #[napi]
   pub async fn delete(&self, url: String, options: Option<FetchOptions>) -> Result<HttpResponse> {
-    let opts = options.map(|o| o.to_core()).transpose()?;
-    let resp = self.inner.delete(&url).maybe_options(opts).await.into_napi()?;
-    Ok(HttpResponse { inner: resp })
+    self.send_verb("DELETE", &url, options).await
   }
 
   /// Send a PATCH request.
   #[napi]
   pub async fn patch(&self, url: String, options: Option<FetchOptions>) -> Result<HttpResponse> {
-    let opts = options.map(|o| o.to_core()).transpose()?;
-    let resp = self.inner.patch(&url).maybe_options(opts).await.into_napi()?;
-    Ok(HttpResponse { inner: resp })
+    self.send_verb("PATCH", &url, options).await
   }
 
   /// Send a HEAD request.
   #[napi]
   pub async fn head(&self, url: String, options: Option<FetchOptions>) -> Result<HttpResponse> {
-    let opts = options.map(|o| o.to_core()).transpose()?;
-    let resp = self.inner.head(&url).maybe_options(opts).await.into_napi()?;
-    Ok(HttpResponse { inner: resp })
+    self.send_verb("HEAD", &url, options).await
   }
 
   /// Mirrors Playwright `apiRequestContext.fetch(urlOrRequest, options?)`.
@@ -472,17 +417,11 @@ impl HttpClient {
       napi::Either::A(url) => (url, None),
       napi::Either::B(req) => (
         req.url(),
-        Some(ferridriver::http_client::RequestOptions {
-          method: Some(req.method()),
-          headers: Some(ferridriver::http_client::replayable_headers(
-            req.inner.headers().into_iter().collect(),
-          )),
-          data: req.inner.post_data_buffer(),
-          ..Default::default()
-        }),
+        Some(ferridriver::http_client::RequestOptions::from_page_request(&req.inner)),
       ),
     };
-    let opts = merge_over(base, options.map(|o| o.to_core()).transpose()?);
+    let opts =
+      ferridriver::http_client::RequestOptions::merge_over(base, options.map(FetchOptions::into_core).transpose()?);
     let resp = self.inner.fetch(&url).maybe_options(opts).await.into_napi()?;
     Ok(HttpResponse { inner: resp })
   }

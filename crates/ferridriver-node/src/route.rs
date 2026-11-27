@@ -138,21 +138,16 @@ impl Route {
     Ok(crate::network::Request::from_core(inner.network_request()))
   }
 
-  /// The request headers as a JSON object.
-  #[napi(getter)]
-  pub fn headers(&self) -> Result<serde_json::Value> {
-    Ok(self.lock()?.as_ref().map_or_else(
-      || serde_json::Value::Object(serde_json::Map::new()),
-      |r| {
-        let map: serde_json::Map<String, serde_json::Value> = r
-          .request()
-          .headers
-          .iter()
-          .map(|(k, v)| (k.clone(), serde_json::Value::String(v.clone())))
-          .collect();
-        serde_json::Value::Object(map)
-      },
-    ))
+  /// The request headers as a flat key/value object.
+  #[napi(getter, ts_return_type = "Record<string, string>")]
+  pub fn headers(&self) -> Result<crate::types::HashMap<String, String>> {
+    Ok(self.lock()?.as_ref().map_or_else(crate::types::HashMap::default, |r| {
+      r.request()
+        .headers
+        .iter()
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect()
+    }))
   }
 
   #[napi(
