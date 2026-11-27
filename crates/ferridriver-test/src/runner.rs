@@ -4354,8 +4354,8 @@ mod project_plan_tests {
 
     let dir = tempfile::tempdir().expect("temp dir");
     // Far enough apart that a timer ticking every 15.6ms (Windows) or a
-    // loaded scheduler cannot swap two of them.
-    let lengths = [20u64, 160, 60, 110];
+    // loaded CI scheduler running parallel test binaries cannot swap two.
+    let lengths = [10u64, 460, 160, 310];
     let files: Vec<std::path::PathBuf> = lengths
       .iter()
       .map(|ms| {
@@ -4399,7 +4399,7 @@ mod project_plan_tests {
     );
     started.lock().expect("order").clear();
     assert_eq!(run().run(plan()).await, super::exit::PASSED);
-    assert_eq!(*started.lock().expect("order"), [160, 110, 60, 20]);
+    assert_eq!(*started.lock().expect("order"), [460, 310, 160, 10]);
   }
 
   /// A project given its own plan runs THAT plan, not the shared one —

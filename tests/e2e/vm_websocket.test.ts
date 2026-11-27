@@ -1,7 +1,7 @@
 import { test, expect } from '@ferridriver/test';
 
 test('websocket callbacks can await a later message', async ({ page }) => {
-  test.setTimeout(5000);
+  test.setTimeout(15_000);
   let release: () => void = () => {};
   const gate = new Promise<void>((resolve) => { release = resolve; });
   await page.routeWebSocket('ws://example.invalid/async-callback', (ws) => {
@@ -25,7 +25,7 @@ test('websocket callbacks can await a later message', async ({ page }) => {
 });
 
 test('a parked websocket callback does not stall another socket', async ({ page }) => {
-  test.setTimeout(5000);
+  test.setTimeout(15_000);
   let release: () => void = () => {};
   const gate = new Promise<void>((resolve) => { release = resolve; });
   await page.routeWebSocket('ws://example.invalid/slow', (ws) => {

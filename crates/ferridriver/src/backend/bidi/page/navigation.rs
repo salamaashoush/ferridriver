@@ -350,54 +350,87 @@ impl BidiPage {
   ///
   /// Returns an error when the `browsingContext.traverseHistory` command fails, and a timeout error
   /// when the traversal or the wait for its response outlasts `timeout_ms`.
-  pub async fn go_back(&self, _lifecycle: NavLifecycle, timeout_ms: u64) -> Result<Option<Response>> {
-    let deadline = crate::backend::deadline_for(timeout_ms);
-    self.nav_request_slot.clear();
-    let result = tokio::time::timeout_at(
-      crate::backend::deadline_for(timeout_ms),
-      self.send_typed(&ferridriver_bidi_proto::browsing_context::TraverseHistory {
-        context: &self.context_id,
-        delta: -1,
-      }),
-    )
-    .await;
-
-    match result {
-      Ok(Ok(_)) => {
-        self
-          .await_nav_response(crate::network::NAV_REQUEST_GRACE, false, deadline, timeout_ms)
-          .await
-      },
-      Ok(Err(e)) => Err(e),
-      Err(_) => Err(FerriError::timeout("go_back", timeout_ms)),
-    }
+  pub async fn go_back(&self, lifecycle: NavLifecycle, timeout_ms: u64) -> Result<Option<Response>> {
+    self.traverse_history(-1, lifecycle, timeout_ms, "go_back").await
   }
 
   /// # Errors
   ///
   /// Returns an error when the `browsingContext.traverseHistory` command fails, and a timeout error
   /// when the traversal or the wait for its response outlasts `timeout_ms`.
-  pub async fn go_forward(&self, _lifecycle: NavLifecycle, timeout_ms: u64) -> Result<Option<Response>> {
+  pub async fn go_forward(&self, lifecycle: NavLifecycle, timeout_ms: u64) -> Result<Option<Response>> {
+    self.traverse_history(1, lifecycle, timeout_ms, "go_forward").await
+  }
+
+  /// `WebDriver` `BiDi` `browsingContext.traverseHistory` has no `wait` parameter:
+  /// it initiates traversal and returns `{}` before the destination document
+  /// loads (unlike `navigate`/`reload`). Tap events before sending the command
+  /// and wait for the destination lifecycle (or same-document history/fragment
+  /// event) so `page.url()` and the main-document response are ready on return.
+  async fn traverse_history(
+    &self,
+    delta: i64,
+    lifecycle: NavLifecycle,
+    timeout_ms: u64,
+    label: &str,
+  ) -> Result<Option<Response>> {
     let deadline = crate::backend::deadline_for(timeout_ms);
     self.nav_request_slot.clear();
+    let mut rx = self.session.transport.tap_events();
     let result = tokio::time::timeout_at(
-      crate::backend::deadline_for(timeout_ms),
+      deadline,
       self.send_typed(&ferridriver_bidi_proto::browsing_context::TraverseHistory {
         context: &self.context_id,
-        delta: 1,
+        delta,
       }),
     )
     .await;
 
     match result {
-      Ok(Ok(_)) => {
-        self
-          .await_nav_response(crate::network::NAV_REQUEST_GRACE, false, deadline, timeout_ms)
-          .await
-      },
-      Ok(Err(e)) => Err(e),
-      Err(_) => Err(FerriError::timeout("go_forward", timeout_ms)),
+      Ok(Ok(_)) => {},
+      Ok(Err(e)) if e.to_string().contains("no such history entry") => return Ok(None),
+      Ok(Err(e)) => return Err(e),
+      Err(_) => return Err(FerriError::timeout(label, timeout_ms)),
     }
+
+    let is_new_document = tokio::time::timeout_at(deadline, async {
+      while let Some(event) = rx.recv().await {
+        if event.params.get("context").and_then(|v| v.as_str()) != Some(&*self.context_id) {
+          continue;
+        }
+        match event.method.as_str() {
+          "browsingContext.historyUpdated" | "browsingContext.fragmentNavigated" => return Ok(false),
+          "browsingContext.navigationCommitted" if matches!(lifecycle, NavLifecycle::Commit) => return Ok(true),
+          "browsingContext.domContentLoaded"
+            if matches!(lifecycle, NavLifecycle::Commit | NavLifecycle::DomContentLoaded) =>
+          {
+            return Ok(true);
+          },
+          "browsingContext.load" => return Ok(true),
+          "browsingContext.navigationFailed" | "browsingContext.navigationAborted" => {
+            return Err(FerriError::Backend(format!("{label}: navigation aborted or failed")));
+          },
+          "browsingContext.contextDestroyed" => {
+            return Err(FerriError::target_closed(Some(
+              "page closed during history traversal".to_string(),
+            )));
+          },
+          _ => {},
+        }
+      }
+      Err(FerriError::backend(format!("BiDi event stream closed during {label}")))
+    })
+    .await
+    .map_err(|_| FerriError::timeout(label, timeout_ms))??;
+
+    let grace = if is_new_document {
+      crate::network::NAV_REQUEST_GRACE
+    } else {
+      std::time::Duration::ZERO
+    };
+    self
+      .await_nav_response(grace, is_new_document, deadline, timeout_ms)
+      .await
   }
 
   /// # Errors
