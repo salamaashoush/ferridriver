@@ -6,6 +6,9 @@
 // assertion here distinguishes "kept both" from "kept one".
 
 import { test, describe, expect } from '@ferridriver/test';
+import { runOnceAcrossProjects } from './helpers/projects';
+
+test.beforeEach(runOnceAcrossProjects);
 
 describe('api response headers', () => {
   test('headers_lowercases_and_joins_repeated_set_cookie', async ({ request, baseURL }) => {

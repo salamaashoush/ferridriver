@@ -1035,18 +1035,25 @@ impl Response {
     self.inner.state.read().await.security_details.clone()
   }
 
+  /// HTTP protocol version already observed on this response, without
+  /// waiting for the response to finish. Used by HAR/trace flushing so an
+  /// open streaming response (such as SSE) is recorded immediately.
+  pub async fn http_version_now(&self) -> Option<String> {
+    self.inner.state.read().await.http_version.clone()
+  }
+
   /// HTTP protocol version (e.g. `http/1.1`), or `None` when the
   /// backend did not report one. Playwright: `response.httpVersion():
   /// Promise<string>` (`client/network.ts`) — async to mirror the
   /// channel round-trip Playwright performs. Waits for the response to
   /// finish when the version arrives on loading-finished metrics (`WebKit`).
   pub async fn http_version(&self) -> Option<String> {
-    let version = self.inner.state.read().await.http_version.clone();
+    let version = self.http_version_now().await;
     if version.is_some() {
       return version;
     }
     let _ = self.finished().await;
-    self.inner.state.read().await.http_version.clone()
+    self.http_version_now().await
   }
 
   // -- Internal mutators ---------------------------------------------------

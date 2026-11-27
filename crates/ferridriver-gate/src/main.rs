@@ -99,19 +99,28 @@ fn select_jobs(jobs: Vec<Job>, selected: &[String]) -> Result<Vec<Job>> {
   Ok(jobs.into_iter().filter(|job| required.contains(&job.name)).collect())
 }
 
-fn jobs(
-  root: &Path,
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum GateMode {
+  Test,
+  Ready,
+}
+
+struct GatePlan<'a> {
   workers: usize,
-  ready: bool,
+  mode: GateMode,
   overlap_ready_prerequisites: bool,
   exclusive: bool,
-  projects: &[String],
-) -> Result<Vec<Job>> {
+  has_rust_build: bool,
+  projects: &'a [String],
+}
+
+fn jobs(root: &Path, plan: &GatePlan<'_>) -> Result<Vec<Job>> {
+  let ready = plan.mode == GateMode::Ready;
   let mut jobs = vec![
     Job::new(
       "build",
       BUILD,
-      if ready && !overlap_ready_prerequisites {
+      if ready && !plan.overlap_ready_prerequisites {
         &["lint"]
       } else {
         &[]
@@ -144,43 +153,25 @@ fn jobs(
       &[],
     ),
     Job::new("napi-build", &["bun", "run", "build:debug"], &["build"]),
-    // The Rust harness UI test drives `cargo test -p rust-e2e-example` and
-    // has 600s for its runs. A cold compile of that target ate the whole
-    // budget on a CI runner, so it is compiled here, outside the test.
-    Job::new(
-      "ui-example-build",
-      &["cargo", "test", "--locked", "-p", "rust-e2e-example", "--no-run"],
-      &["build"],
-    ),
     Job::new(
       "doc-tests",
       &["cargo", "test", "--locked", "--workspace", "--doc"],
       &["rust-build"],
     ),
   ];
-  let mut addon_files = std::fs::read_dir(root.join("crates/ferridriver-node/test"))?
-    .map(|entry| entry.map(|entry| entry.path()))
-    .collect::<std::io::Result<Vec<_>>>()?;
-  addon_files.sort();
-  for path in addon_files {
-    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
-      continue;
-    };
-    if path.is_file()
-      && [".test.ts", ".test.js", ".test.mjs"]
-        .iter()
-        .any(|suffix| name.ends_with(suffix))
-    {
-      // bun's default of 5s per test is less than a cold Firefox launch
-      // takes on a CI runner, and these tests launch their own browsers.
-      jobs.push(Job::new(
-        &format!("napi/{name}"),
-        &["bun", "test", &format!("test/{name}"), "--timeout", "30000"],
-        &["napi-build", "types"],
-      ));
-    }
+  if !plan.has_rust_build {
+    // The Rust harness UI test drives `cargo test -p rust-e2e-example` and
+    // has 600s for its runs. A cold compile of that target ate the whole
+    // budget on a CI runner, so when `rust-build` is not already compiling
+    // every workspace test target, build this package up front.
+    jobs.push(Job::new(
+      "ui-example-build",
+      &["cargo", "test", "--locked", "-p", "rust-e2e-example", "--no-run"],
+      &["build"],
+    ));
   }
-  if ready && overlap_ready_prerequisites {
+  jobs.extend(napi_jobs(root)?);
+  if ready && plan.overlap_ready_prerequisites {
     // The executable build is the prerequisite for browser suites, while
     // clippy is an independent verdict. Let them overlap in the full gate
     // so a slow lint cannot keep the native gate idle before E2E starts.
@@ -189,7 +180,7 @@ fn jobs(
   if ready {
     jobs.extend(ready_jobs());
   }
-  jobs.extend(suite_jobs(workers, exclusive, projects));
+  jobs.extend(suite_jobs(plan));
   for job in &mut jobs {
     if job.name.starts_with("napi") {
       job.cwd = "crates/ferridriver-node".into();
@@ -202,7 +193,7 @@ fn jobs(
         job.browsers = if job.name == "napi/api-response.test.ts" {
           0
         } else {
-          workers.min(2)
+          plan.workers.min(2)
         };
       }
     }
@@ -211,6 +202,78 @@ fn jobs(
     }
   }
   Ok(jobs)
+}
+
+/// Group the NAPI addon test files into balanced parallel jobs.
+///
+/// Running 80+ tiny test files as separate `bun test` processes spends most
+/// of the wall clock in Bun cold-start and process-group teardown. Large
+/// suites and the zero-browser HTTP client test stay dedicated so LPT starts
+/// them first, while smaller files are size-balanced into a compact set of
+/// multi-file shards.
+fn napi_jobs(root: &Path) -> Result<Vec<Job>> {
+  const DEDICATED_MIN_BYTES: u64 = 10_000;
+  const TARGET_FILES_PER_SHARD: usize = 7;
+  const MAX_SHARDS: usize = 10;
+
+  let mut entries = Vec::new();
+  for entry in std::fs::read_dir(root.join("crates/ferridriver-node/test"))? {
+    let path = entry?.path();
+    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+      continue;
+    };
+    if path.is_file()
+      && [".test.ts", ".test.js", ".test.mjs"]
+        .iter()
+        .any(|suffix| name.ends_with(suffix))
+    {
+      let size = path.metadata().map_or(0, |meta| meta.len());
+      entries.push((name.to_string(), size));
+    }
+  }
+  entries.sort_by(|a, b| a.0.cmp(&b.0));
+
+  let mut out = Vec::new();
+  let mut small = Vec::new();
+  for (name, size) in entries {
+    if name == "api-response.test.ts" || size >= DEDICATED_MIN_BYTES {
+      // bun's default of 5s per test is less than a cold Firefox launch
+      // takes on a CI runner, and these tests launch their own browsers.
+      out.push(Job::new(
+        &format!("napi/{name}"),
+        &["bun", "test", &format!("test/{name}"), "--timeout", "30000"],
+        &["napi-build", "types"],
+      ));
+    } else {
+      small.push((name, size));
+    }
+  }
+  if small.is_empty() {
+    return Ok(out);
+  }
+  // Greedy LPT bin-packing by source size so every shard finishes together.
+  small.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+  let shard_count = small.len().div_ceil(TARGET_FILES_PER_SHARD).clamp(1, MAX_SHARDS);
+  let mut buckets: Vec<(u64, Vec<String>)> = vec![(0, Vec::new()); shard_count];
+  for (name, size) in small {
+    if let Some(bucket) = buckets.iter_mut().min_by_key(|(total, _)| *total) {
+      bucket.0 += size;
+      bucket.1.push(format!("test/{name}"));
+    }
+  }
+  for (index, (_, mut files)) in buckets.into_iter().enumerate() {
+    if files.is_empty() {
+      continue;
+    }
+    files.sort();
+    let mut command = vec!["bun".to_string(), "test".to_string()];
+    command.extend(files);
+    command.extend(["--timeout".to_string(), "30000".to_string()]);
+    let mut job = Job::new(&format!("napi/shard-{:02}", index + 1), &[], &["napi-build", "types"]);
+    job.command = command;
+    out.push(job);
+  }
+  Ok(out)
 }
 
 fn ready_jobs() -> Vec<Job> {
@@ -251,14 +314,11 @@ fn ready_jobs() -> Vec<Job> {
 /// their engines have not implemented yet.
 const GATED_PROJECTS: [&str; 4] = ["chromium", "chromium-ws", "firefox", "webkit"];
 
-fn suite_jobs(workers: usize, exclusive: bool, projects: &[String]) -> Vec<Job> {
-  let mut jobs = Vec::new();
+fn e2e_job(workers: usize, projects: &[String]) -> Job {
   // Browser work is mostly waiting on independent renderer processes. The
   // one-CPU CI quota otherwise collapses the E2E suite to a serial run; 16
   // workers is the measured throughput knee for this suite.
   let e2e_workers = workers.clamp(1, 16);
-  let shared_workers = if exclusive { workers } else { (workers / 8).max(1) };
-  let worker_count = shared_workers.to_string();
   let mut e2e = Job::new(
     "e2e",
     &[
@@ -282,7 +342,17 @@ fn suite_jobs(workers: usize, exclusive: bool, projects: &[String]) -> Vec<Job> 
     e2e.command.extend(["--project".to_string(), project.to_string()]);
   }
   e2e.browsers = e2e_workers;
-  jobs.push(e2e);
+  e2e
+}
+
+fn suite_jobs(plan: &GatePlan<'_>) -> Vec<Job> {
+  let mut jobs = vec![e2e_job(plan.workers, plan.projects)];
+  let shared_workers = if plan.exclusive {
+    plan.workers
+  } else {
+    (plan.workers / 8).max(1)
+  };
+  let worker_count = shared_workers.to_string();
   for (name, command) in [
     (
       "integration",
@@ -334,7 +404,11 @@ fn suite_jobs(workers: usize, exclusive: bool, projects: &[String]) -> Vec<Job> 
     ),
   ] {
     let dependencies: &[&str] = if name == "integration" {
-      &["build", "types", "ui-example-build"]
+      if plan.has_rust_build {
+        &["build", "types", "rust-build"]
+      } else {
+        &["build", "types", "ui-example-build"]
+      }
     } else {
       &["build", "types"]
     };
@@ -438,10 +512,12 @@ async fn main() -> Result<()> {
     .map(|s| positive(&s))
     .transpose()?
     .unwrap_or(32);
-  // Keep independent browser suites in flight even when the container is
-  // CPU-quota limited; their browser processes spend most of their time in
-  // renderer/IO waits.
-  let mut parallel = 4;
+  // Scale process concurrency to the host (at least 4 so a CPU-quota CI
+  // container still overlaps IO-bound browser waits, up to 16 on desktops so
+  // NAPI shards and Rust unit tests saturate the machine without starving).
+  let mut parallel = std::thread::available_parallelism()
+    .map_or(8, std::num::NonZeroUsize::get)
+    .clamp(4, 16);
   let mut mode = "ready".to_string();
   let mut selected = Vec::new();
   let mut projects = Vec::new();
@@ -463,17 +539,19 @@ async fn main() -> Result<()> {
     .filter(|name| BROWSER_SUITES.contains(&name.as_str()))
     .count()
     == 1;
-  let jobs = select_jobs(
-    jobs(
-      &root,
-      workers,
-      mode == "ready",
-      selected.is_empty(),
-      exclusive,
-      &projects,
-    )?,
-    &selected,
-  )?;
+  let plan = GatePlan {
+    workers,
+    mode: if mode == "ready" {
+      GateMode::Ready
+    } else {
+      GateMode::Test
+    },
+    overlap_ready_prerequisites: selected.is_empty(),
+    exclusive,
+    has_rust_build: selected.is_empty() || selected.iter().any(|name| name == "rust-build"),
+    projects: &projects,
+  };
+  let jobs = select_jobs(jobs(&root, &plan)?, &selected)?;
   run_gate(&root, workers, parallel, jobs).await
 }
 

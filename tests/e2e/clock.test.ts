@@ -22,8 +22,9 @@ describe('clock', () => {
     }
     // The installed clock runs in real time and pauseAt cannot move it
     // backwards, so pausing at the install instant raced every millisecond
-    // between the two calls. A second of headroom holds on a loaded runner.
-    const pausedAt = 1000000001000;
+    // between the two calls. Ten seconds of headroom holds under heavy
+    // parallel load without adding any real-time wait.
+    const pausedAt = 1000000010000;
     await context.clock.install({ time: 1000000000000 });
     await context.clock.pauseAt(pausedAt);
     for (const frame of frames) {

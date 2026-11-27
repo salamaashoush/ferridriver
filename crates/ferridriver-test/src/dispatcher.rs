@@ -205,6 +205,35 @@ struct Waiter {
 pub(crate) struct SlotLease {
   slots: Option<Arc<RunSlots>>,
   index: u32,
+  /// Tracks this slot's claim on the roster's head item until the worker
+  /// actually pops its first item (or drops the lease).
+  pending_grant: Option<Arc<PendingGrant>>,
+}
+
+/// Counts a granted slot against its roster's queue head until the worker
+/// dequeues its first item. Without this, granting multiple free slots in
+/// one `assign()` loop sees the same unpopped head item for every waiter of
+/// a project and hands the entire slot budget to one project at a time.
+pub(crate) struct PendingGrant {
+  roster: Arc<WorkerRoster>,
+  active: std::sync::atomic::AtomicBool,
+}
+
+impl PendingGrant {
+  fn resolve_under_lock(&self, state: &mut RosterState) {
+    if self.active.swap(false, std::sync::atomic::Ordering::SeqCst) {
+      state.pending_grants = state.pending_grants.saturating_sub(1);
+    }
+  }
+}
+
+impl Drop for PendingGrant {
+  fn drop(&mut self) {
+    if self.active.swap(false, std::sync::atomic::Ordering::SeqCst) {
+      let mut state = self.roster.lock();
+      state.pending_grants = state.pending_grants.saturating_sub(1);
+    }
+  }
 }
 
 impl RunSlots {
@@ -280,14 +309,17 @@ impl RunSlots {
         return;
       };
       let waiter = state.waiters.remove(position);
+      let pending_grant = waiter.roster.grant_pending();
       drop(state);
       let lease = SlotLease {
         slots: Some(Arc::clone(self)),
         index,
+        pending_grant: Some(pending_grant),
       };
       // A waiter that stopped waiting leaves the slot free for the next.
       if let Err(mut unclaimed) = waiter.grant.send(lease) {
         unclaimed.slots = None;
+        unclaimed.pending_grant = None;
         self.lock().free.insert(unclaimed.index);
       }
     }
@@ -307,10 +339,15 @@ impl SlotLease {
   pub(crate) fn index(&self) -> u32 {
     self.index
   }
+
+  pub(crate) fn pending_grant(&self) -> Option<Arc<PendingGrant>> {
+    self.pending_grant.as_ref().map(Arc::clone)
+  }
 }
 
 impl Drop for SlotLease {
   fn drop(&mut self) {
+    self.pending_grant = None;
     if let Some(slots) = self.slots.take() {
       slots.release(self.index);
     }
@@ -338,6 +375,9 @@ pub struct WorkerRoster {
 struct RosterState {
   live: usize,
   cap: usize,
+  /// Slots granted to waiters of this roster that have not yet popped their
+  /// first item from `queued`.
+  pending_grants: usize,
   /// Expected milliseconds of each queued item, in queue order.
   queued: std::collections::VecDeque<u64>,
 }
@@ -347,6 +387,7 @@ struct RosterState {
 pub struct RosterPlace {
   roster: Arc<WorkerRoster>,
   present: std::sync::atomic::AtomicBool,
+  pending_grant: std::sync::OnceLock<Arc<PendingGrant>>,
 }
 
 impl WorkerRoster {
@@ -365,11 +406,20 @@ impl WorkerRoster {
       state: std::sync::Mutex::new(RosterState {
         live: 0,
         cap: cap.max(1),
+        pending_grants: 0,
         queued: planned.into(),
       }),
       run_slots: run_slots.max(1),
       after,
       emptied: tokio::sync::Notify::new(),
+    })
+  }
+
+  fn grant_pending(self: &Arc<Self>) -> Arc<PendingGrant> {
+    self.lock().pending_grants += 1;
+    Arc::new(PendingGrant {
+      roster: Arc::clone(self),
+      active: std::sync::atomic::AtomicBool::new(true),
     })
   }
 
@@ -395,12 +445,13 @@ impl WorkerRoster {
   /// and the projects waiting on it.
   pub(crate) fn priority(&self) -> u64 {
     let state = self.lock();
-    let Some(&head) = state.queued.front() else {
-      return self.after;
+    let offset = state.pending_grants;
+    let Some(&head) = state.queued.get(offset) else {
+      return if offset == 0 { self.after } else { 0 };
     };
     let mut path = head.saturating_add(self.after);
     if state.cap < self.run_slots {
-      let rest: u64 = state.queued.iter().skip(1).sum();
+      let rest: u64 = state.queued.iter().skip(offset + 1).sum();
       path = path.saturating_add(rest / state.cap as u64);
     }
     path
@@ -414,6 +465,7 @@ impl WorkerRoster {
     RosterPlace {
       roster: Arc::clone(self),
       present: std::sync::atomic::AtomicBool::new(true),
+      pending_grant: std::sync::OnceLock::new(),
     }
   }
 
@@ -428,6 +480,7 @@ impl WorkerRoster {
       .map(|_| RosterPlace {
         roster: Arc::clone(self),
         present: std::sync::atomic::AtomicBool::new(true),
+        pending_grant: std::sync::OnceLock::new(),
       })
       .collect()
   }
@@ -461,10 +514,19 @@ impl WorkerRoster {
 }
 
 impl RosterPlace {
+  pub(crate) fn attach_pending_grant(&self, grant: Option<Arc<PendingGrant>>) {
+    if let Some(grant) = grant {
+      let _ = self.pending_grant.set(grant);
+    }
+  }
+
   /// The next queued item, or `None` once the queue is empty or closed,
   /// in which case the worker has left the roster.
   pub fn next_or_leave(&self, rx: &async_channel::Receiver<WorkItem>) -> Option<WorkItem> {
     let mut state = self.roster.lock();
+    if let Some(grant) = self.pending_grant.get() {
+      grant.resolve_under_lock(&mut state);
+    }
     if let Ok(item) = rx.try_recv() {
       state.queued.pop_front();
       return Some(item);
@@ -655,5 +717,43 @@ mod tests {
     assert!(!first_asker.is_finished(), "kept for the project still starting");
     slots.started(&launching);
     first_asker.await.expect("given out once that project has started");
+  }
+
+  #[tokio::test]
+  async fn multi_project_slots_distribute_across_long_tails_instead_of_starving() {
+    let slots = RunSlots::new(4);
+    let project_a = WorkerRoster::planned(4, 4, 0, vec![35_000, 35_000, 1_000, 1_000]);
+    let project_b = WorkerRoster::planned(4, 4, 0, vec![34_000, 34_000, 1_000, 1_000]);
+    // Hold all 4 slots while both projects queue their waiters, matching
+    // concurrent multi-project startup.
+    let blocker = WorkerRoster::new(4, 4);
+    let held = vec![
+      slots.take(&blocker).await,
+      slots.take(&blocker).await,
+      slots.take(&blocker).await,
+      slots.take(&blocker).await,
+    ];
+    let mut a_tasks = Vec::new();
+    let mut b_tasks = Vec::new();
+    for _ in 0..4 {
+      let (s, r) = (Arc::clone(&slots), Arc::clone(&project_a));
+      a_tasks.push(tokio::spawn(async move { s.take(&r).await }));
+      let (s, r) = (Arc::clone(&slots), Arc::clone(&project_b));
+      b_tasks.push(tokio::spawn(async move { s.take(&r).await }));
+    }
+    tokio::task::yield_now().await;
+    drop(held);
+    tokio::task::yield_now().await;
+
+    let a_granted = a_tasks.iter().filter(|t| t.is_finished()).count();
+    let b_granted = b_tasks.iter().filter(|t| t.is_finished()).count();
+    assert_eq!(
+      (a_granted, b_granted),
+      (2, 2),
+      "each project should get 2 slots for its two 35s/34s tails"
+    );
+    for t in a_tasks.into_iter().chain(b_tasks) {
+      t.abort();
+    }
   }
 }

@@ -10,6 +10,9 @@
 // /fx/endpoints.
 
 import { test, describe, expect } from '@ferridriver/test';
+import { runOnceAcrossProjects } from './helpers/projects';
+
+test.beforeEach(runOnceAcrossProjects);
 
 type Endpoints = { proxy: string; reset: string; tls: string };
 

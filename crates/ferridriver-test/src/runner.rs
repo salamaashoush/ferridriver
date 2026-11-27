@@ -1585,43 +1585,26 @@ impl TestRunner {
     let (result_tx, result_rx) = mpsc::channel::<WorkerTestResult>(256);
     let shared_browser = self.matching_shared_browser(&launch_plan, &connection);
     let launch_failed = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    // When multiple workers launch Chromium or WebKit locally without an
-    // already-shared session browser, share one lazy browser process across all
-    // workers in this run (each worker gets a scoped Browser view with isolated
-    // contexts). Cuts cold-start contention and memory by N× while remaining
-    // 100% lazy for fixtureless suites. BiDi/Firefox is intentionally excluded
-    // because Firefox launches with `dom.ipc.processCount = 1`, which would
-    // serialize all workers onto a single content thread. Set
-    // FERRIDRIVER_SHARE_BROWSER=0 to disable.
-    let share_enabled = !matches!(std::env::var("FERRIDRIVER_SHARE_BROWSER").as_deref(), Ok("0" | "false"));
-    let run_shared_handle = if share_enabled
-      && shared_browser.is_none()
-      && num_workers > 1
-      && connection == ConnectMode::Launch
-      && matches!(
-        launch_plan.backend,
-        ferridriver::backend::BackendKind::CdpPipe
-          | ferridriver::backend::BackendKind::CdpWs
-          | ferridriver::backend::BackendKind::WebKit
-      ) {
-      Some(Arc::new(
-        BrowserHandle::with_connection(launch_plan.clone(), connection.clone())
-          .reporting_launch_failure(Arc::clone(&launch_failed))
-          .recycling_contexts(self.config.context_reuse),
-      ))
-    } else {
-      None
-    };
+    let (workers_per_browser, run_shared_handles) = shared_browser_pool(
+      &launch_plan,
+      &connection,
+      num_workers,
+      shared_browser.is_some(),
+      self.config.context_reuse,
+      &launch_failed,
+    );
     let spawner = WorkerSpawner {
       config: Arc::clone(&self.config),
       event_bus: event_bus.has_subscribers().then(|| event_bus.clone()),
       live_traces: self.live_traces,
       worker_ids: Arc::clone(&self.worker_ids),
+      project_worker_seq: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+      workers_per_browser,
       dispatcher: Arc::clone(&dispatcher),
       result_tx,
       custom_fixtures,
       shared_browser,
-      run_shared_handle: run_shared_handle.clone(),
+      run_shared_handles: run_shared_handles.clone(),
       launch_plan,
       connection,
       // Set by any worker whose browser failed to launch: the tests it
@@ -1656,10 +1639,10 @@ impl TestRunner {
     }
 
     let infrastructure_failed = join_workers(worker_handles, event_bus).await;
-    if let Some(handle) = run_shared_handle
-      && let Err(error) = handle.close().await
-    {
-      tracing::warn!(target: "ferridriver::runner", "shared browser cleanup failed: {error}");
+    for handle in run_shared_handles {
+      if let Err(error) = handle.close().await {
+        tracing::warn!(target: "ferridriver::runner", "shared browser cleanup failed: {error}");
+      }
     }
     Ok(WorkersRun {
       attempt_history,
@@ -3121,6 +3104,58 @@ struct ResultCollection<'a> {
   spawner: &'a WorkerSpawner,
 }
 
+/// Pool workers across lazy shared browser processes (up to
+/// `workers_per_browser` workers per process, default 4) for local Chromium
+/// and `WebKit` launches.
+///
+/// Sharing cuts cold-start contention and memory, while bounding fan-in per
+/// browser keeps Chrome's single browser IO/UI thread from saturating at high
+/// worker counts. `BiDi`/Firefox is excluded because Firefox runs with
+/// `dom.ipc.processCount = 1`, which would serialize workers onto one content
+/// thread. Set `FERRIDRIVER_SHARE_BROWSER=0` to disable, or
+/// `FERRIDRIVER_WORKERS_PER_BROWSER=N` to tune pool size.
+fn shared_browser_pool(
+  launch_plan: &LaunchPlan,
+  connection: &ConnectMode,
+  num_workers: u32,
+  has_shared_browser: bool,
+  context_reuse: bool,
+  launch_failed: &Arc<std::sync::atomic::AtomicBool>,
+) -> (usize, Vec<Arc<BrowserHandle>>) {
+  const DEFAULT_WORKERS_PER_SHARED_BROWSER: usize = 4;
+  let share_enabled = !matches!(std::env::var("FERRIDRIVER_SHARE_BROWSER").as_deref(), Ok("0" | "false"));
+  let workers_per_browser = std::env::var("FERRIDRIVER_WORKERS_PER_BROWSER")
+    .ok()
+    .and_then(|v| v.parse::<usize>().ok())
+    .filter(|&n| n > 0)
+    .unwrap_or(DEFAULT_WORKERS_PER_SHARED_BROWSER);
+  let handles = if share_enabled
+    && !has_shared_browser
+    && num_workers > 1
+    && workers_per_browser > 1
+    && *connection == ConnectMode::Launch
+    && matches!(
+      launch_plan.backend,
+      ferridriver::backend::BackendKind::CdpPipe
+        | ferridriver::backend::BackendKind::CdpWs
+        | ferridriver::backend::BackendKind::WebKit
+    ) {
+    let pool_size = (num_workers as usize).div_ceil(workers_per_browser);
+    (0..pool_size)
+      .map(|_| {
+        Arc::new(
+          BrowserHandle::with_connection(launch_plan.clone(), connection.clone())
+            .reporting_launch_failure(Arc::clone(launch_failed))
+            .recycling_contexts(context_reuse),
+        )
+      })
+      .collect()
+  } else {
+    Vec::new()
+  };
+  (workers_per_browser, handles)
+}
+
 /// Starts the run's workers. Worker numbers are handed out per RUN, not
 /// per runner: projects execute concurrently, and two workers numbered 0
 /// would share a scratch directory, a `.playwright-artifacts-0` the UI
@@ -3135,11 +3170,13 @@ struct WorkerSpawner {
   event_bus: Option<EventBus>,
   live_traces: bool,
   worker_ids: Arc<std::sync::atomic::AtomicU32>,
+  project_worker_seq: Arc<std::sync::atomic::AtomicUsize>,
+  workers_per_browser: usize,
   dispatcher: Arc<Dispatcher>,
   result_tx: mpsc::Sender<WorkerTestResult>,
   custom_fixtures: FxHashMap<String, crate::fixture::FixtureDef>,
   shared_browser: Option<Arc<Browser>>,
-  run_shared_handle: Option<Arc<BrowserHandle>>,
+  run_shared_handles: Vec<Arc<BrowserHandle>>,
   launch_plan: LaunchPlan,
   connection: ConnectMode,
   launch_failed: Arc<std::sync::atomic::AtomicBool>,
@@ -3153,11 +3190,13 @@ impl WorkerSpawner {
     let event_bus = self.event_bus.clone();
     let live_traces = self.live_traces;
     let worker_ids = Arc::clone(&self.worker_ids);
+    let project_worker_seq = Arc::clone(&self.project_worker_seq);
+    let workers_per_browser = self.workers_per_browser;
     let rx = self.dispatcher.receiver();
     let tx = self.result_tx.clone();
     let custom_fixtures = self.custom_fixtures.clone();
     let shared = self.shared_browser.clone();
-    let run_shared = self.run_shared_handle.clone();
+    let run_shared_handles = self.run_shared_handles.clone();
     let plan = self.launch_plan.clone();
     let connection = self.connection.clone();
     let stop_flag = self.dispatcher.stop_flag();
@@ -3170,6 +3209,16 @@ impl WorkerSpawner {
       // last test would overlap the next worker's launch with a live
       // browser.
       let lease = slots.take(&roster).await;
+      place.attach_pending_grant(lease.pending_grant());
+      let run_shared = if run_shared_handles.is_empty() {
+        None
+      } else {
+        // Assign sequentially in chunks of `workers_per_browser` so a run
+        // that only acquires a few slots launches only the needed browsers.
+        let seq = project_worker_seq.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let bucket = (seq / workers_per_browser) % run_shared_handles.len();
+        Some(Arc::clone(&run_shared_handles[bucket]))
+      };
       let mut pending = None;
       loop {
         let id = worker_ids.fetch_add(1, std::sync::atomic::Ordering::SeqCst);

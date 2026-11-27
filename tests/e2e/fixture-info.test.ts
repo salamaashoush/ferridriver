@@ -3,6 +3,7 @@
 
 import { test as base, expect } from '@ferridriver/test';
 import type { WorkerInfo } from '@ferridriver/test';
+import { runOnceAcrossProjects } from './helpers/projects';
 
 const test = base.extend<{ titled: string; outputDir: string; worker: WorkerInfo }>({
   titled: async ({}, use, testInfo) => {
@@ -18,6 +19,8 @@ const test = base.extend<{ titled: string; outputDir: string; worker: WorkerInfo
     { scope: 'worker' },
   ],
 });
+
+test.beforeEach(runOnceAcrossProjects);
 
 test('a test fixture reads the test it runs for', async ({ titled, outputDir }, testInfo) => {
   expect(titled).toBe('a test fixture reads the test it runs for');
