@@ -384,6 +384,12 @@ struct EmitterShared<E> {
   subscribers: std::sync::Mutex<Vec<SubscriberSlot<E>>>,
   /// Events a pending [`Emitter::wait_for_event`] is waiting on, by id.
   waiters: std::sync::Mutex<Vec<(u64, String)>>,
+  /// Count of live consumers (`state_observer` + `listeners` + `subscribers`).
+  /// Incremented (`SeqCst`) before a new consumer mints its `registered`
+  /// sequence number and decremented only after removal, so `consumers == 0`
+  /// lets `emit` / `emit_stamped` short-circuit without allocating, locking,
+  /// or waking a dispatcher task.
+  consumers: std::sync::atomic::AtomicUsize,
 }
 
 /// Unregisters a [`Emitter::wait_for_event`] waiter however its wait ends.
@@ -462,6 +468,7 @@ fn dispatch_event<E: EmitterEvent>(
   }
   {
     let mut listeners = lock_or_recover(&shared.listeners);
+    let before = listeners.len();
     // Collect matching callbacks in registration order and drop
     // `once` slots before invoking, so a recursive emit from inside
     // a callback can never re-fire them.
@@ -473,6 +480,10 @@ fn dispatch_event<E: EmitterEvent>(
         true
       }
     });
+    let removed = before - listeners.len();
+    if removed > 0 {
+      shared.consumers.fetch_sub(removed, Ordering::SeqCst);
+    }
   }
   // No lock held while invoking callbacks — they may reenter the
   // emitter (on/off/subscribe/emit).
@@ -491,21 +502,47 @@ fn dispatch_event<E: EmitterEvent>(
     cb(event.clone());
   }
   let mut subscribers = lock_or_recover(&shared.subscribers);
-  if subscribers.len() == 1 {
+  let before = subscribers.len();
+  if before == 1 {
     if subscribers[0].registered < sequence && subscribers[0].tx.send(StampedEvent { event, sequence }).is_err() {
       subscribers.clear();
     }
-  } else {
-    subscribers.retain(|slot| {
-      slot.registered >= sequence
-        || slot
+  } else if before > 1 {
+    // Move `event` into the last eligible subscriber instead of cloning for all N.
+    let last_eligible = subscribers.iter().rposition(|slot| slot.registered < sequence);
+    if let Some(last_idx) = last_eligible {
+      let mut event = Some(event);
+      let mut idx = 0usize;
+      subscribers.retain(|slot| {
+        let current = idx;
+        idx += 1;
+        if slot.registered >= sequence {
+          return true;
+        }
+        let payload = if current == last_idx {
+          match event.take() {
+            Some(ev) => ev,
+            None => return true,
+          }
+        } else {
+          match event.as_ref() {
+            Some(ev) => ev.clone(),
+            None => return true,
+          }
+        };
+        slot
           .tx
           .send(StampedEvent {
-            event: event.clone(),
+            event: payload,
             sequence,
           })
           .is_ok()
-    });
+      });
+    }
+  }
+  let removed = before - subscribers.len();
+  if removed > 0 {
+    shared.consumers.fetch_sub(removed, Ordering::SeqCst);
   }
 }
 
@@ -544,6 +581,7 @@ impl<E: EmitterEvent> Emitter<E> {
         listeners: std::sync::Mutex::new(Vec::new()),
         subscribers: std::sync::Mutex::new(Vec::new()),
         waiters: std::sync::Mutex::new(Vec::new()),
+        consumers: std::sync::atomic::AtomicUsize::new(0),
       }),
       pending_rx: std::sync::Mutex::new(Some(queue_rx)),
       dispatcher_running: AtomicBool::new(false),
@@ -551,9 +589,9 @@ impl<E: EmitterEvent> Emitter<E> {
       next_id: AtomicU64::new(1),
       max_listeners: std::sync::atomic::AtomicUsize::new(DEFAULT_MAX_LISTENERS),
     });
-    let emitter = Self { inner };
-    emitter.ensure_dispatcher();
-    emitter
+    // Dispatcher spawns lazily on the first consumer registration so quiet
+    // emitters (unsubscribed contexts, browsers, websockets) cost zero tasks.
+    Self { inner }
   }
 
   /// Spawn the dispatcher task if it isn't running yet. Queued events
@@ -602,18 +640,31 @@ impl<E: EmitterEvent> Emitter<E> {
   }
 
   /// Emit an event. Never blocks and never drops: the event is queued
-  /// for the dispatcher task.
+  /// for the dispatcher task (or discarded immediately when no consumers are
+  /// attached).
   pub fn emit(&self, event: E) {
-    self.emit_stamped(event, EVENT_SEQUENCE.fetch_add(1, Ordering::Relaxed));
+    if self.inner.shared.consumers.load(Ordering::SeqCst) == 0 {
+      return;
+    }
+    self.emit_stamped(event, EVENT_SEQUENCE.fetch_add(1, Ordering::SeqCst));
   }
 
   pub(crate) fn emit_stamped(&self, event: E, sequence: u64) {
+    if self.inner.shared.consumers.load(Ordering::SeqCst) == 0 {
+      return;
+    }
     self.ensure_dispatcher();
     let _ = self.inner.queue_tx.send(StampedEvent { event, sequence });
   }
 
   pub(crate) fn set_state_observer(&self, observer: StateObserver<E>) -> bool {
-    self.inner.shared.state_observer.set(observer).is_ok()
+    if self.inner.shared.state_observer.set(observer).is_ok() {
+      self.inner.shared.consumers.fetch_add(1, Ordering::SeqCst);
+      self.ensure_dispatcher();
+      true
+    } else {
+      false
+    }
   }
 
   /// Whether any named listener registered via [`Self::on`] or
@@ -645,14 +696,12 @@ impl<E: EmitterEvent> Emitter<E> {
   /// slot immediately.
   #[must_use]
   pub fn subscribe(&self) -> EventSubscription<E> {
+    self.inner.shared.consumers.fetch_add(1, Ordering::SeqCst);
+    let registered = EVENT_SEQUENCE.fetch_add(1, Ordering::SeqCst);
     self.ensure_dispatcher();
     let id = self.inner.next_id.fetch_add(1, Ordering::Relaxed);
     let (tx, rx) = mpsc::unbounded_channel();
-    lock_or_recover(&self.inner.shared.subscribers).push(SubscriberSlot {
-      id,
-      registered: EVENT_SEQUENCE.fetch_add(1, Ordering::Relaxed),
-      tx,
-    });
+    lock_or_recover(&self.inner.shared.subscribers).push(SubscriberSlot { id, registered, tx });
     EventSubscription {
       rx,
       id,
@@ -741,11 +790,13 @@ impl<E: EmitterEvent> Emitter<E> {
     once: bool,
     front: bool,
   ) -> ListenerId {
+    self.inner.shared.consumers.fetch_add(1, Ordering::SeqCst);
+    let registered = EVENT_SEQUENCE.fetch_add(1, Ordering::SeqCst);
     self.ensure_dispatcher();
     let id = self.inner.next_id.fetch_add(1, Ordering::Relaxed);
     let slot = ListenerSlot {
       id,
-      registered: EVENT_SEQUENCE.fetch_add(1, Ordering::Relaxed),
+      registered,
       name: event_name.to_string(),
       once,
       callback,
@@ -833,19 +884,36 @@ impl<E: EmitterEvent> Emitter<E> {
 
   /// Remove an event listener by ID.
   pub fn off(&self, id: ListenerId) {
-    lock_or_recover(&self.inner.shared.listeners).retain(|slot| slot.id != id.0);
+    let mut listeners = lock_or_recover(&self.inner.shared.listeners);
+    let before = listeners.len();
+    listeners.retain(|slot| slot.id != id.0);
+    let removed = before - listeners.len();
+    if removed > 0 {
+      self.inner.shared.consumers.fetch_sub(removed, Ordering::SeqCst);
+    }
   }
 
   /// Remove all event listeners.
   pub fn remove_all_listeners(&self) {
-    lock_or_recover(&self.inner.shared.listeners).clear();
+    let mut listeners = lock_or_recover(&self.inner.shared.listeners);
+    let removed = listeners.len();
+    listeners.clear();
+    if removed > 0 {
+      self.inner.shared.consumers.fetch_sub(removed, Ordering::SeqCst);
+    }
   }
 
   /// Remove every listener registered for `event_name`, leaving other
   /// events' listeners attached (Playwright's
   /// `removeAllListeners(type)` with a type argument).
   pub fn remove_listeners_named(&self, event_name: &str) {
-    lock_or_recover(&self.inner.shared.listeners).retain(|slot| slot.name != event_name);
+    let mut listeners = lock_or_recover(&self.inner.shared.listeners);
+    let before = listeners.len();
+    listeners.retain(|slot| slot.name != event_name);
+    let removed = before - listeners.len();
+    if removed > 0 {
+      self.inner.shared.consumers.fetch_sub(removed, Ordering::SeqCst);
+    }
   }
 }
 
@@ -862,7 +930,13 @@ pub struct EventSubscription<E> {
 impl<E> Drop for EventSubscription<E> {
   fn drop(&mut self) {
     if let Some(shared) = self.shared.upgrade() {
-      lock_or_recover(&shared.subscribers).retain(|slot| slot.id != self.id);
+      let mut subscribers = lock_or_recover(&shared.subscribers);
+      let before = subscribers.len();
+      subscribers.retain(|slot| slot.id != self.id);
+      let removed = before - subscribers.len();
+      if removed > 0 {
+        shared.consumers.fetch_sub(removed, Ordering::SeqCst);
+      }
     }
   }
 }
@@ -1326,5 +1400,41 @@ mod tests {
     emitter.emit(PageEvent::Load);
     settle(&counter, 1).await;
     assert_eq!(counter.load(Ordering::SeqCst), 1);
+  }
+
+  #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+  async fn idle_emitter_stays_lazy_and_resumes_on_attach_detach_cycles() {
+    let emitter = EventEmitter::new();
+    // Emitting without any consumer must not spawn the dispatcher task.
+    emitter.emit(PageEvent::Load);
+    assert!(!emitter.inner.dispatcher_running.load(Ordering::Acquire));
+    assert_eq!(emitter.inner.shared.consumers.load(Ordering::SeqCst), 0);
+
+    let sub1 = emitter.subscribe();
+    let mut sub2 = emitter.subscribe();
+    assert!(emitter.inner.dispatcher_running.load(Ordering::Acquire));
+    assert_eq!(emitter.inner.shared.consumers.load(Ordering::SeqCst), 2);
+    drop(sub1);
+    assert_eq!(emitter.inner.shared.consumers.load(Ordering::SeqCst), 1);
+
+    emitter.emit(PageEvent::DomContentLoaded);
+    assert!(matches!(
+      tokio::time::timeout(std::time::Duration::from_secs(1), sub2.recv()).await,
+      Ok(Some(PageEvent::DomContentLoaded))
+    ));
+    drop(sub2);
+    assert_eq!(emitter.inner.shared.consumers.load(Ordering::SeqCst), 0);
+
+    // Re-attaching after returning to 0 consumers delivers subsequent events cleanly.
+    let counter = Arc::new(AtomicUsize::new(0));
+    let id = emitter.once("load", counting(&counter));
+    assert_eq!(emitter.inner.shared.consumers.load(Ordering::SeqCst), 1);
+    emitter.emit(PageEvent::Load);
+    settle(&counter, 1).await;
+    assert_eq!(counter.load(Ordering::SeqCst), 1);
+    assert_eq!(emitter.inner.shared.consumers.load(Ordering::SeqCst), 0);
+    // Double off is a no-op and must not underflow consumers.
+    emitter.off(id);
+    assert_eq!(emitter.inner.shared.consumers.load(Ordering::SeqCst), 0);
   }
 }
