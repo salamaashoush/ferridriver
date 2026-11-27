@@ -137,7 +137,7 @@ impl Meta {
       return;
     };
     for raw in frames {
-      let Ok(frame) = serde_json::from_value::<FrameRecord>(raw.clone()) else {
+      let Ok(frame) = <FrameRecord as serde::Deserialize>::deserialize(raw) else {
         continue;
       };
       let is_main = match (frame.is_in_primary_main_frame, frame.is_outermost_main_frame) {

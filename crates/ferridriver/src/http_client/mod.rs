@@ -1124,9 +1124,15 @@ impl RequestOptions {
     match (data, json) {
       (_, Some(json)) => (None, Some(json)),
       (Some(serde_json::Value::String(s)), None) => (Some(s.into_bytes()), None),
-      (Some(value), None) if value.is_array() => match serde_json::from_value::<Vec<u8>>(value.clone()) {
-        Ok(bytes) => (Some(bytes), None),
-        Err(_) => (None, Some(value)),
+      (Some(serde_json::Value::Array(items)), None) => {
+        match items
+          .iter()
+          .map(|v| v.as_u64().and_then(|n| u8::try_from(n).ok()))
+          .collect::<Option<Vec<u8>>>()
+        {
+          Some(bytes) => (Some(bytes), None),
+          None => (None, Some(serde_json::Value::Array(items))),
+        }
       },
       (Some(value), None) => (None, Some(value)),
       (None, None) => (None, None),

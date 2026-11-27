@@ -64,14 +64,18 @@ pub(super) async fn handle_request_will_be_sent(
     .and_then(Value::as_str)
     .unwrap_or("GET")
     .to_string();
-  let mut headers = Headers::default();
-  if let Some(map) = request_payload.get("headers").and_then(Value::as_object) {
-    for (k, v) in map {
-      if let Some(s) = v.as_str() {
-        headers.insert(k.clone(), s.to_string());
+  let headers = request_payload
+    .get("headers")
+    .and_then(Value::as_object)
+    .map_or_else(Headers::default, |map| {
+      let mut headers = Headers::with_capacity_and_hasher(map.len(), rustc_hash::FxBuildHasher);
+      for (k, v) in map {
+        if let Some(s) = v.as_str() {
+          headers.insert(k.clone(), s.to_string());
+        }
       }
-    }
-  }
+      headers
+    });
   let resource_type = params
     .get("type")
     .and_then(Value::as_str)
@@ -143,14 +147,18 @@ fn build_response(request: NetworkRequest, response: &Value, body_fn: Option<Bod
     .and_then(Value::as_str)
     .unwrap_or("")
     .to_string();
-  let mut headers = Headers::default();
-  if let Some(map) = response.get("headers").and_then(Value::as_object) {
-    for (k, v) in map {
-      if let Some(s) = v.as_str() {
-        headers.insert(k.clone(), s.to_string());
+  let headers = response
+    .get("headers")
+    .and_then(Value::as_object)
+    .map_or_else(Headers::default, |map| {
+      let mut headers = Headers::with_capacity_and_hasher(map.len(), rustc_hash::FxBuildHasher);
+      for (k, v) in map {
+        if let Some(s) = v.as_str() {
+          headers.insert(k.clone(), s.to_string());
+        }
       }
-    }
-  }
+      headers
+    });
   // The protocol reports response headers as a map, so a header the
   // server sent twice arrives joined and would otherwise be one entry.
   // Playwright splits the same value the same way
@@ -199,15 +207,13 @@ pub(super) async fn handle_response_received(
   target: &crate::backend::webkit::connection::Session,
   emitter: &crate::events::EventEmitter,
 ) {
-  let request_id = params
-    .get("requestId")
-    .and_then(Value::as_str)
-    .unwrap_or("")
-    .to_string();
+  let Some(request_id) = params.get("requestId").and_then(Value::as_str) else {
+    return;
+  };
   let Some(req) = requests
     .lock()
     .unwrap_or_else(std::sync::PoisonError::into_inner)
-    .get(&request_id)
+    .get(request_id)
     .cloned()
   else {
     return;
@@ -215,7 +221,7 @@ pub(super) async fn handle_response_received(
   let Some(response_payload) = params.get("response") else {
     return;
   };
-  let body_fn = build_body_fn(target.clone(), request_id);
+  let body_fn = build_body_fn(target.clone(), request_id.to_string());
   let response = build_response(req.clone(), response_payload, Some(body_fn));
   req.set_response(&response).await;
   emitter.emit(crate::events::PageEvent::Response(response));
@@ -351,49 +357,47 @@ pub(super) fn pw_remote_object_to_backing(arg: &Value) -> crate::js_handle::JSHa
   if let Some(obj_id) = arg.get("objectId").and_then(Value::as_str) {
     return JSHandleBacking::Remote(HandleRemote::WebKit(Arc::from(obj_id)));
   }
-  let value = arg.get("value").cloned().unwrap_or(Value::Null);
-  let ty = arg.get("type").and_then(Value::as_str).unwrap_or("");
-  let serialized = if value.is_null() {
-    if ty == "undefined" {
-      SerializedValue::Special(SpecialValue::Undefined)
-    } else {
-      SerializedValue::Special(SpecialValue::Null)
-    }
-  } else {
-    SerializedValue::from_json(&value, &mut SerializationContext::default())
+  let serialized = match arg.get("value") {
+    None | Some(Value::Null) => {
+      if arg.get("type").and_then(Value::as_str) == Some("undefined") {
+        SerializedValue::Special(SpecialValue::Undefined)
+      } else {
+        SerializedValue::Special(SpecialValue::Null)
+      }
+    },
+    Some(value) => SerializedValue::from_json(value, &mut SerializationContext::default()),
   };
   JSHandleBacking::Value(serialized)
 }
 
-pub(super) type WebSockets = Arc<tokio::sync::Mutex<rustc_hash::FxHashMap<String, WebSocket>>>;
+pub(super) type WebSockets = Arc<std::sync::Mutex<rustc_hash::FxHashMap<String, WebSocket>>>;
 
 /// `Network.webSocketCreated` → register live [`WebSocket`] keyed by
 /// `requestId` and emit [`PageEvent::WebSocket`] so user code attached
 /// via `page.waitForEvent('websocket')` can grab it.
-pub(super) async fn handle_websocket_created(
-  params: &Value,
-  websockets: &WebSockets,
-  emitter: &crate::events::EventEmitter,
-) {
+pub(super) fn handle_websocket_created(params: &Value, websockets: &WebSockets, emitter: &crate::events::EventEmitter) {
   let Some(request_id) = params.get("requestId").and_then(Value::as_str) else {
     return;
   };
   let url = params.get("url").and_then(Value::as_str).unwrap_or("").to_string();
   let ws = WebSocket::new(url);
-  websockets.lock().await.insert(request_id.to_string(), ws.clone());
+  websockets
+    .lock()
+    .unwrap_or_else(std::sync::PoisonError::into_inner)
+    .insert(request_id.to_string(), ws.clone());
   emitter.emit(crate::events::PageEvent::WebSocket(ws));
 }
 
 /// `Network.webSocketFrame{Sent,Received}` → emit one frame on the live
 /// [`WebSocket`]. Opcode 2 → binary (base64-decoded), otherwise text.
-pub(super) async fn handle_websocket_frame(params: &Value, websockets: &WebSockets, sent: bool) {
+pub(super) fn handle_websocket_frame(params: &Value, websockets: &WebSockets, sent: bool) {
   let Some(request_id) = params.get("requestId").and_then(Value::as_str) else {
     return;
   };
   let Some(payload) = crate::network::websocket_frame_payload(params) else {
     return;
   };
-  let map = websockets.lock().await;
+  let map = websockets.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
   if let Some(ws) = map.get(request_id) {
     if sent {
       ws.emit_frame_sent(payload);
@@ -403,7 +407,7 @@ pub(super) async fn handle_websocket_frame(params: &Value, websockets: &WebSocke
   }
 }
 
-pub(super) async fn handle_websocket_error(params: &Value, websockets: &WebSockets) {
+pub(super) fn handle_websocket_error(params: &Value, websockets: &WebSockets) {
   let Some(request_id) = params.get("requestId").and_then(Value::as_str) else {
     return;
   };
@@ -412,16 +416,23 @@ pub(super) async fn handle_websocket_error(params: &Value, websockets: &WebSocke
     .and_then(Value::as_str)
     .unwrap_or("WebSocket error")
     .to_string();
-  if let Some(ws) = websockets.lock().await.get(request_id) {
+  if let Some(ws) = websockets
+    .lock()
+    .unwrap_or_else(std::sync::PoisonError::into_inner)
+    .get(request_id)
+  {
     ws.emit_error(message);
   }
 }
 
-pub(super) async fn handle_websocket_closed(params: &Value, websockets: &WebSockets) {
+pub(super) fn handle_websocket_closed(params: &Value, websockets: &WebSockets) {
   let Some(request_id) = params.get("requestId").and_then(Value::as_str) else {
     return;
   };
-  let closed = websockets.lock().await.remove(request_id);
+  let closed = websockets
+    .lock()
+    .unwrap_or_else(std::sync::PoisonError::into_inner)
+    .remove(request_id);
   if let Some(ws) = closed {
     ws.emit_close();
   }

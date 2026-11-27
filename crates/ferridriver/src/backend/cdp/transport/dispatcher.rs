@@ -14,7 +14,7 @@ use crate::error::{FerriError, Result};
 use super::{
   AtomicU64, CdpDispatcher, CdpResult, EVENT_BROADCAST_CAPACITY, EventTap, IframeTargetEvent, IframeTargetSubscription,
   LifecycleTracker, PendingCommand, PendingEntry, RttStats, SessionDirty, global_rtt_stats, is_clean_session_command,
-  lock_or_recover, rtt_stats_enabled, send_to_taps, truncate_for_log,
+  lock_or_recover, rtt_stats_enabled, send_to_taps, send_to_taps_read, truncate_for_log,
 };
 
 impl CdpDispatcher {
@@ -33,6 +33,7 @@ impl CdpDispatcher {
       method_taps: Arc::new(DashMap::default()),
       domain_taps: Arc::new(DashMap::default()),
       wildcard_taps: Arc::new(std::sync::Mutex::new(Vec::new())),
+      has_wildcard_taps: std::sync::atomic::AtomicBool::new(false),
       rtt_stats: Arc::new(std::sync::Mutex::new(RttStats::default())),
       session_dirty: std::sync::Mutex::default(),
       permissions_dirty_contexts: std::sync::Mutex::default(),
@@ -138,6 +139,7 @@ impl CdpDispatcher {
         tx,
         strict: true,
       });
+      self.has_wildcard_taps.store(true, Ordering::Release);
     }
     rx
   }
@@ -203,12 +205,13 @@ impl CdpDispatcher {
     for mut entry in self.domain_taps.iter_mut() {
       drop_session(entry.value_mut());
     }
-    drop_session(
-      &mut self
-        .wildcard_taps
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner),
-    );
+    {
+      let mut wildcard = lock_or_recover(&self.wildcard_taps);
+      drop_session(&mut wildcard);
+      if wildcard.is_empty() {
+        self.has_wildcard_taps.store(false, Ordering::Release);
+      }
+    }
   }
 
   pub(crate) fn subscribe_events(&self) -> broadcast::Receiver<Arc<serde_json::Value>> {
@@ -270,6 +273,7 @@ impl CdpDispatcher {
     self.method_taps.clear();
     self.domain_taps.clear();
     lock_or_recover(&self.wildcard_taps).clear();
+    self.has_wildcard_taps.store(false, Ordering::Release);
     lock_or_recover(&self.context_snapshots).0.clear();
     lock_or_recover(&self.session_dirty).clear();
     lock_or_recover(&self.permissions_dirty_contexts).clear();
@@ -664,9 +668,9 @@ impl CdpDispatcher {
       if method_str != "Runtime.bindingCalled" {
         snapshots.observe(sid_str, method_str, raw);
       }
-      self.dispatch_lifecycle(raw, method_str, sid_str);
+      self.dispatch_lifecycle(raw, env.params, method_str, sid_str);
     } else {
-      self.dispatch_lifecycle(raw, method_str, sid_str);
+      self.dispatch_lifecycle(raw, env.params, method_str, sid_str);
     }
 
     tracing::trace!(
@@ -675,6 +679,10 @@ impl CdpDispatcher {
       "CDP << event",
     );
 
+    self.fanout_event(raw, method_str, sid_str);
+  }
+
+  fn fanout_event(&self, raw: &[u8], method_str: &str, sid_str: &str) {
     let domain = method_str.split_once('.').map(|(domain, _)| domain);
     let method_tx = self.method_event_txs.get(method_str).map(|entry| entry.clone());
     let domain_tx = domain.and_then(|d| self.domain_event_txs.get(d).map(|entry| entry.clone()));
@@ -682,9 +690,20 @@ impl CdpDispatcher {
     let needs_global = global.as_ref().is_some_and(|sender| sender.receiver_count() > 0);
     let needs_method = method_tx.as_ref().is_some_and(|tx| tx.receiver_count() > 0);
     let needs_domain = domain_tx.as_ref().is_some_and(|tx| tx.receiver_count() > 0);
-    let has_method_taps = self.method_taps.get(method_str).is_some_and(|taps| !taps.is_empty());
-    let has_domain_taps = domain.is_some_and(|d| self.domain_taps.get(d).is_some_and(|taps| !taps.is_empty()));
-    let has_wildcard_taps = !lock_or_recover(&self.wildcard_taps).is_empty();
+    let has_method_taps = self
+      .method_taps
+      .get(method_str)
+      .is_some_and(|taps| taps.iter().any(|tap| tap.matches_session(sid_str)));
+    let has_domain_taps = domain.is_some_and(|d| {
+      self
+        .domain_taps
+        .get(d)
+        .is_some_and(|taps| taps.iter().any(|tap| tap.matches_session(sid_str)))
+    });
+    let has_wildcard_taps = self.has_wildcard_taps.load(Ordering::Acquire)
+      && lock_or_recover(&self.wildcard_taps)
+        .iter()
+        .any(|tap| tap.matches_session(sid_str));
     let target_event = matches!(method_str, "Target.attachedToTarget" | "Target.detachedFromTarget");
 
     if (target_event
@@ -701,18 +720,21 @@ impl CdpDispatcher {
         lock_or_recover(&self.iframe_targets).dispatch(&msg);
       }
       // Taps first: state trackers must see the event before any
-      // best-effort broadcast consumer can react to it.
-      if has_method_taps && let Some(mut taps) = self.method_taps.get_mut(method_str) {
-        send_to_taps(&mut taps, sid_str, &msg);
+      // best-effort broadcast consumer can react to it. Deliver under a
+      // shared shard read lock and only take an exclusive write lock to
+      // prune if a receiver was dropped.
+      if has_method_taps {
+        Self::deliver_to_taps(&self.method_taps, method_str, sid_str, &msg);
       }
-      if has_domain_taps
-        && let Some(d) = domain
-        && let Some(mut taps) = self.domain_taps.get_mut(d)
-      {
-        send_to_taps(&mut taps, sid_str, &msg);
+      if has_domain_taps && let Some(d) = domain {
+        Self::deliver_to_taps(&self.domain_taps, d, sid_str, &msg);
       }
       if has_wildcard_taps {
-        send_to_taps(&mut lock_or_recover(&self.wildcard_taps), sid_str, &msg);
+        let mut wildcard = lock_or_recover(&self.wildcard_taps);
+        send_to_taps(&mut wildcard, sid_str, &msg);
+        if wildcard.is_empty() {
+          self.has_wildcard_taps.store(false, Ordering::Release);
+        }
       }
       if needs_global && let Some(sender) = global.as_ref() {
         let _ = sender.send(Arc::clone(&msg));
@@ -723,6 +745,20 @@ impl CdpDispatcher {
       if needs_domain && let Some(tx) = domain_tx {
         let _ = tx.send(msg);
       }
+    }
+  }
+
+  fn deliver_to_taps(
+    taps_map: &DashMap<&'static str, Vec<EventTap>>,
+    key: &str,
+    sid_str: &str,
+    msg: &Arc<serde_json::Value>,
+  ) {
+    let prune = taps_map
+      .get(key)
+      .is_some_and(|taps| send_to_taps_read(&taps, sid_str, msg));
+    if prune && let Some(mut taps) = taps_map.get_mut(key) {
+      taps.retain(|tap| !tap.tx.is_closed());
     }
   }
 
@@ -737,12 +773,11 @@ impl CdpDispatcher {
   ///
   /// `Inspector.targetCrashed` sets `crashed` and wakes waiters so
   /// goto/reload return immediately instead of stalling until timeout.
-  fn dispatch_lifecycle(&self, raw: &[u8], method_str: &str, key: &str) {
+  fn dispatch_lifecycle(&self, raw: &[u8], params: &[u8], method_str: &str, key: &str) {
     if let Some(tracker) = self.lifecycle_trackers.get(key) {
       (tracker.frame_observer)(raw, method_str);
       match method_str {
         "Page.frameNavigated" => {
-          let params = json_scan::json_field(raw, b"params");
           let frame = json_scan::json_field(params, b"frame");
           let parent_id = json_scan::json_field(frame, b"parentId");
           if !parent_id.is_empty() {
@@ -762,7 +797,6 @@ impl CdpDispatcher {
           tracker.notify.notify_waiters();
         },
         "Page.navigatedWithinDocument" => {
-          let params = json_scan::json_field(raw, b"params");
           let frame_id = json_scan::json_string(json_scan::json_field(params, b"frameId"));
           let frame_id_owned = std::str::from_utf8(frame_id).unwrap_or("").to_string();
           {
@@ -785,7 +819,6 @@ impl CdpDispatcher {
           tracker.notify.notify_waiters();
         },
         "Page.lifecycleEvent" => {
-          let params = json_scan::json_field(raw, b"params");
           let loader_id = json_scan::json_string(json_scan::json_field(params, b"loaderId"));
           let loader_id_str = std::str::from_utf8(loader_id).unwrap_or("");
           let name = json_scan::json_string(json_scan::json_field(params, b"name"));
@@ -838,6 +871,13 @@ impl CdpDispatcher {
 
 pub(super) fn navigated_frame(frame: &serde_json::Value) -> crate::backend::FrameInfo {
   let text = |key: &str| frame.get(key).and_then(serde_json::Value::as_str).unwrap_or("");
+  let base_url = text("url");
+  let fragment = text("urlFragment");
+  let url = if fragment.is_empty() {
+    base_url.to_string()
+  } else {
+    format!("{base_url}{fragment}")
+  };
   crate::backend::FrameInfo {
     frame_id: text("id").to_string(),
     parent_frame_id: frame
@@ -845,7 +885,7 @@ pub(super) fn navigated_frame(frame: &serde_json::Value) -> crate::backend::Fram
       .and_then(serde_json::Value::as_str)
       .map(str::to_owned),
     name: text("name").to_string(),
-    url: format!("{}{}", text("url"), text("urlFragment")),
+    url,
   }
 }
 

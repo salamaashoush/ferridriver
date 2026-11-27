@@ -1,5 +1,7 @@
 //! `CdpPage` CDP event listener tasks (console, dialog, file chooser, download, network, frames).
 
+use serde::Deserialize as _;
+
 use super::{
   Arc, BindingCall, CdpPage, CdpTransport, CdpWorker, ConsoleMessage, DownloadsDir, FxHashMap, NetworkRequest,
   NetworkTracker, RwLock, UTILITY_WORLD, cdp_exception_to_error_details, cdp_exception_to_location,
@@ -142,8 +144,7 @@ impl CdpPage {
     emitter: &crate::events::EventEmitter,
     page_backref: &crate::backend::PageBackref,
   ) {
-    let Ok(payload) = serde_json::from_value::<ferridriver_cdp_proto::runtime::ConsoleApiCalledEvent>(params.clone())
-    else {
+    let Ok(payload) = ferridriver_cdp_proto::runtime::ConsoleApiCalledEvent::deserialize(params) else {
       return;
     };
     let type_str = if payload.kind.is_empty() {
@@ -283,8 +284,7 @@ impl CdpPage {
     file_chooser_manager: &crate::file_chooser::FileChooserManager,
     page_backref: &crate::backend::PageBackref,
   ) {
-    let Ok(payload) = serde_json::from_value::<ferridriver_cdp_proto::page::FileChooserOpenedEvent>(params.clone())
-    else {
+    let Ok(payload) = ferridriver_cdp_proto::page::FileChooserOpenedEvent::deserialize(params) else {
       return;
     };
     let Some(backend_node_id) = payload.backend_node_id else {
@@ -522,9 +522,7 @@ impl CdpPage {
         let Some(params) = event.get("params") else {
           continue;
         };
-        let Ok(payload) =
-          serde_json::from_value::<ferridriver_cdp_proto::page::JavascriptDialogOpeningEvent>(params.clone())
-        else {
+        let Ok(payload) = ferridriver_cdp_proto::page::JavascriptDialogOpeningEvent::deserialize(params) else {
           continue;
         };
         let dialog_type_str = if payload.dialog_type.is_empty() {
@@ -667,8 +665,7 @@ impl CdpPage {
     downloads_dir: &DownloadsDir,
     page_backref: &crate::backend::PageBackref,
   ) {
-    let Ok(payload) = serde_json::from_value::<ferridriver_cdp_proto::browser::DownloadWillBeginEvent>(params.clone())
-    else {
+    let Ok(payload) = ferridriver_cdp_proto::browser::DownloadWillBeginEvent::deserialize(params) else {
       return;
     };
     if payload.guid.is_empty() {
@@ -719,8 +716,7 @@ impl CdpPage {
     download_manager: &crate::download::DownloadManager,
     downloads_dir: &DownloadsDir,
   ) {
-    let Ok(payload) = serde_json::from_value::<ferridriver_cdp_proto::browser::DownloadProgressEvent>(params.clone())
-    else {
+    let Ok(payload) = ferridriver_cdp_proto::browser::DownloadProgressEvent::deserialize(params) else {
       return;
     };
     if payload.guid.is_empty() {

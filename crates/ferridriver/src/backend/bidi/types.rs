@@ -168,7 +168,7 @@ fn entries_to_json_map(entries: Option<&Vec<serde_json::Value>>) -> serde_json::
     // Key can be a bare string or a RemoteValue
     let key = if let Some(s) = arr[0].as_str() {
       s.to_string()
-    } else if let Ok(rv) = serde_json::from_value::<RemoteValue>(arr[0].clone()) {
+    } else if let Ok(rv) = RemoteValue::deserialize(&arr[0]) {
       rv.to_json()
         .and_then(|v| v.as_str().map(String::from))
         .unwrap_or_default()
@@ -176,7 +176,7 @@ fn entries_to_json_map(entries: Option<&Vec<serde_json::Value>>) -> serde_json::
       continue;
     };
     // Value is always a RemoteValue
-    let val = if let Ok(rv) = serde_json::from_value::<RemoteValue>(arr[1].clone()) {
+    let val = if let Ok(rv) = RemoteValue::deserialize(&arr[1]) {
       rv.to_json().unwrap_or(serde_json::Value::Null)
     } else {
       arr[1].clone()

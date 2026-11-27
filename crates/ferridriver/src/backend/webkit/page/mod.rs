@@ -363,7 +363,7 @@ pub struct WebKitPageInner {
   /// listener inserts on `Network.webSocketCreated`, emits frames on
   /// `webSocketFrameSent` / `webSocketFrameReceived`, and removes the
   /// entry on `webSocketClosed`.
-  pub(crate) websockets: Arc<tokio::sync::Mutex<rustc_hash::FxHashMap<String, crate::network::WebSocket>>>,
+  pub(crate) websockets: Arc<std::sync::Mutex<rustc_hash::FxHashMap<String, crate::network::WebSocket>>>,
   /// Dedicated workers of the current target, by `workerId`.
   pub(crate) workers: super::worker::Workers,
   pub(crate) screencast_hub: crate::backend::screencast::ScreencastHub,
@@ -724,7 +724,7 @@ impl WebKitPage {
         utility_contexts: Arc::new(tokio::sync::RwLock::new(rustc_hash::FxHashMap::default())),
         frame_engine_contexts: Arc::new(tokio::sync::RwLock::new(rustc_hash::FxHashMap::default())),
         main_frame_id_cache,
-        websockets: Arc::new(tokio::sync::Mutex::new(rustc_hash::FxHashMap::default())),
+        websockets: Arc::new(std::sync::Mutex::new(rustc_hash::FxHashMap::default())),
         workers: Arc::default(),
         screencast_hub: crate::backend::screencast::ScreencastHub::default(),
         network_idle: Arc::default(),

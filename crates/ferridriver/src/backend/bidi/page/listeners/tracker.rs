@@ -20,8 +20,8 @@ pub(super) struct BidiNetworkTracker {
   /// captured `Request` as its `page_guid` for context-level page
   /// attribution.
   context_id: Arc<str>,
-  requests: tokio::sync::Mutex<FxHashMap<String, NetworkRequest>>,
-  responses: tokio::sync::Mutex<FxHashMap<String, Response>>,
+  requests: std::sync::Mutex<FxHashMap<String, NetworkRequest>>,
+  responses: std::sync::Mutex<FxHashMap<String, Response>>,
   nav_request_slot: crate::network::NavRequestSlot,
   /// Shared with [`BidiPage::http_credentials`] — answers
   /// `network.authRequired` challenges.
@@ -33,7 +33,7 @@ pub(super) struct BidiNetworkTracker {
   /// challenge for the same request means the credentials were wrong —
   /// cancel instead of looping (Playwright's
   /// `_attemptedAuthentications`). Cleared on request completion.
-  attempted_auth: tokio::sync::Mutex<rustc_hash::FxHashSet<String>>,
+  attempted_auth: std::sync::Mutex<rustc_hash::FxHashSet<String>>,
 }
 
 impl BidiNetworkTracker {
@@ -47,12 +47,12 @@ impl BidiNetworkTracker {
     Self {
       session,
       context_id,
-      requests: tokio::sync::Mutex::new(FxHashMap::default()),
-      responses: tokio::sync::Mutex::new(FxHashMap::default()),
+      requests: std::sync::Mutex::new(FxHashMap::default()),
+      responses: std::sync::Mutex::new(FxHashMap::default()),
       nav_request_slot,
       credentials,
       network,
-      attempted_auth: tokio::sync::Mutex::new(rustc_hash::FxHashSet::default()),
+      attempted_auth: std::sync::Mutex::new(rustc_hash::FxHashSet::default()),
     }
   }
 
@@ -99,8 +99,11 @@ impl BidiNetworkTracker {
       .unwrap_or(0)
       > 0
     {
-      let mut requests = self.requests.lock().await;
-      requests.remove(&id)
+      self
+        .requests
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .remove(&id)
     } else {
       None
     };
@@ -136,7 +139,11 @@ impl BidiNetworkTracker {
       });
     }
 
-    self.requests.lock().await.insert(id.clone(), new_request.clone());
+    self
+      .requests
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner)
+      .insert(id, new_request.clone());
 
     // Main-document navigations: update the per-page slot so
     // `BidiPage::goto` / `reload` / `go_back` / `go_forward` can
@@ -166,15 +173,24 @@ impl BidiNetworkTracker {
     else {
       return;
     };
-    let request_id = request_id.to_string();
-    let Some(req) = self.requests.lock().await.get(&request_id).cloned() else {
+    let Some(req) = self
+      .requests
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner)
+      .get(request_id)
+      .cloned()
+    else {
       return;
     };
     let Some(resp) = params.get("response") else {
       return;
     };
-    let response = self.build_response(req.clone(), resp, &request_id);
-    self.responses.lock().await.insert(request_id, response.clone());
+    let response = self.build_response(req.clone(), resp, request_id);
+    self
+      .responses
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner)
+      .insert(request_id.to_string(), response.clone());
     req.set_response(&response).await;
     emitter.emit(PageEvent::Response(response));
   }
@@ -187,19 +203,25 @@ impl BidiNetworkTracker {
     else {
       return;
     };
-    let request_id = request_id.to_string();
-    let Some(req) = self.requests.lock().await.get(&request_id).cloned() else {
+    let Some(req) = self
+      .requests
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner)
+      .get(request_id)
+      .cloned()
+    else {
       return;
     };
     // BiDi sometimes omits responseStarted (e.g. cache-served responses);
     // synthesise the Response here if necessary.
+    let mut synthesized = None;
     if req.existing_response().await.is_none()
       && let Some(resp) = params.get("response")
     {
-      let response = self.build_response(req.clone(), resp, &request_id);
-      self.responses.lock().await.insert(request_id.clone(), response.clone());
+      let response = self.build_response(req.clone(), resp, request_id);
       req.set_response(&response).await;
-      emitter.emit(PageEvent::Response(response));
+      emitter.emit(PageEvent::Response(response.clone()));
+      synthesized = Some(response);
     }
     if let Some(resp) = params.get("response") {
       let resp_headers = resp.get("headersSize").and_then(serde_json::Value::as_u64).unwrap_or(0);
@@ -224,11 +246,23 @@ impl BidiNetworkTracker {
         });
       }
     }
-    let response = self.responses.lock().await.get(&request_id).cloned();
+    let response = synthesized.or_else(|| {
+      self
+        .responses
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .remove(request_id)
+    });
     if let Some(resp) = response {
       resp.finish_success().await;
     }
-    forget_auth_attempts(&mut *self.attempted_auth.lock().await, &request_id);
+    forget_auth_attempts(
+      &mut self
+        .attempted_auth
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner),
+      request_id,
+    );
     emitter.emit(PageEvent::RequestFinished(req));
   }
 
@@ -240,7 +274,7 @@ impl BidiNetworkTracker {
   /// listener never stalls behind it; a failure (e.g. the request died
   /// while the answer was in flight) is logged, matching Playwright's
   /// `sendMayFail`.
-  pub(super) async fn on_auth_required(self: &Arc<Self>, params: &serde_json::Value) {
+  pub(super) fn on_auth_required(self: &Arc<Self>, params: &serde_json::Value) {
     let Some(request_id) = params
       .get("request")
       .and_then(|r| r.get("request"))
@@ -289,7 +323,10 @@ impl BidiNetworkTracker {
     };
     let answer = match answering {
       Some(c) => {
-        let mut attempted = self.attempted_auth.lock().await;
+        let mut attempted = self
+          .attempted_auth
+          .lock()
+          .unwrap_or_else(std::sync::PoisonError::into_inner);
         if attempted.insert(auth_attempt_key(request_id, from_proxy)) {
           json!({
             "request": request_id,
@@ -328,8 +365,12 @@ impl BidiNetworkTracker {
     else {
       return;
     };
-    let request_id = request_id.to_string();
-    let Some(req) = self.requests.lock().await.get(&request_id).cloned() else {
+    let Some(req) = self
+      .requests
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner)
+      .remove(request_id)
+    else {
       return;
     };
     let error_text = params
@@ -338,11 +379,21 @@ impl BidiNetworkTracker {
       .unwrap_or("net::ERR_FAILED")
       .to_string();
     req.set_failure(error_text.clone());
-    let response = self.responses.lock().await.get(&request_id).cloned();
+    let response = self
+      .responses
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner)
+      .remove(request_id);
     if let Some(resp) = response {
       resp.finish_failure(error_text).await;
     }
-    forget_auth_attempts(&mut *self.attempted_auth.lock().await, &request_id);
+    forget_auth_attempts(
+      &mut self
+        .attempted_auth
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner),
+      request_id,
+    );
     emitter.emit(PageEvent::RequestFailed(req));
   }
 

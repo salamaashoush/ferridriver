@@ -495,7 +495,7 @@ pub(super) fn storage_state_value(storage: &crate::options::StorageStateInput) -
 pub(super) fn state_credentials(state: &serde_json::Value) -> Result<Vec<crate::credentials::VirtualCredential>> {
   match state.get("credentials") {
     None | Some(serde_json::Value::Null) => Ok(Vec::new()),
-    Some(list) => serde_json::from_value(list.clone())
+    Some(list) => <Vec<crate::credentials::VirtualCredential> as serde::Deserialize>::deserialize(list)
       .map_err(|e| crate::error::FerriError::invalid_argument("storageState", format!("credentials: {e}"))),
   }
 }
