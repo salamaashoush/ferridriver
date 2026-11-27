@@ -48,8 +48,11 @@ macro_rules! retry_resolve {
     // Trace span for the whole retried action — every exit path below
     // funnels through `break 'retry` so the span always closes with the
     // final outcome (timeout / strict violation / success / hard error).
+    // When no trace recorder, action observer, debugger gate, or pending-call
+    // tracker is active, skip building the JSON params map and `"page@..."`
+    // string completely.
     let __trace_page = $self.frame.page_arc();
-    let __trace_span = {
+    let __trace_span = if $crate::trace::call_origins_wanted() {
       let __trace_composite = __trace_page.context().map(|c| c.composite());
       let mut __trace_params = ::serde_json::json!({ "selector": $self.selector });
       if let (
@@ -61,27 +64,32 @@ macro_rules! retry_resolve {
           __dst.insert(__k.clone(), __v.clone());
         }
       }
-      $crate::trace::begin_action(
+      let __span = $crate::trace::begin_action(
         __trace_composite.as_deref(),
         "Locator",
         $op,
         ::std::option::Option::Some(format!("page@{}", __trace_page.backend_page_id())),
         __trace_params,
-      )
+      );
+      if __span.is_some() {
+        $crate::trace::open_action(__trace_page.snapshot_before(__span).await).await
+      } else {
+        ::std::option::Option::None
+      }
+    } else {
+      ::std::option::Option::None
     };
-    let __trace_span = $crate::trace::open_action(__trace_page.snapshot_before(__trace_span).await).await;
-    // Playwright's `Call log:`, attached to the error if the action times out.
-    let mut __call_log: ::std::vec::Vec<::std::string::String> =
-      ::std::vec![format!("waiting for {}", $crate::locator_generator::as_locator(&$self.selector))];
+    let __op_name: &str = $op;
+    // Playwright's `Call log:`, lazily materialized only on tracing, retry,
+    // abort, or timeout so the common first-try success path pays zero
+    // allocations and skips `as_locator` selector re-parsing.
+    let mut __call_log = $crate::locator::LazyCallLog::new(&$self.selector, __op_name);
     if let ::std::option::Option::Some(__s) = __trace_span.as_ref() {
-      __s.log(__call_log[0].clone());
+      __s.log(__call_log.waiting_line().to_owned());
     }
     // Input-time capture (target mark + input@ snapshot + point) fires
     // once, on the first successful resolution.
     let mut __trace_input_pending = __trace_span.is_some();
-    // Last call-log line, to collapse identical retry messages.
-    let mut __trace_last_log = ::std::string::String::new();
-    let __op_name: &str = $op;
     let __resolved_timeout: u64 = $timeout_ms.unwrap_or_else(|| $self.frame.page_arc().default_timeout());
     let __deadline: ::std::option::Option<::std::time::Instant> = if __resolved_timeout == 0 {
       ::std::option::Option::None
@@ -116,15 +124,15 @@ macro_rules! retry_resolve {
           && __signal.is_aborted()
         {
           let __error = __signal.error();
-          __call_log.push(format!("operation was aborted: {}", __error));
-          break 'retry ::std::result::Result::Err(__error.with_call_log(::std::mem::take(&mut __call_log)));
+          __call_log.push_aborted(&__error);
+          break 'retry ::std::result::Result::Err(__error.with_call_log(__call_log.into_vec()));
         }
         // Deadline check up-front so we never race into one more attempt after
         // time has already run out.
         if __expired() {
           break 'retry ::std::result::Result::Err(
             $crate::error::FerriError::timeout(__op_name.to_string(), __resolved_timeout)
-              .with_call_log(::std::mem::take(&mut __call_log)),
+              .with_call_log(__call_log.into_vec()),
           );
         }
 
@@ -194,9 +202,7 @@ macro_rules! retry_resolve {
         // implementation paid on every retry attempt (~2 RTTs).
         match $crate::selectors::query_one_prebuilt($page, &__sel_js, &$self.selector, __frame_id).await {
           ::std::result::Result::Ok($el) => {
-            if __call_log.len() == 1 {
-              __call_log.push(format!("attempting {} action", __op_name));
-            }
+            __call_log.mark_attempted();
             if __trace_input_pending {
               __trace_input_pending = false;
               if let ::std::option::Option::Some(__s) = __trace_span.as_ref() {
@@ -210,8 +216,8 @@ macro_rules! retry_resolve {
             match ::std::boxed::Box::pin($crate::actions::with_pointer_context(__try, (!__rframe.is_main_frame()).then(|| __rframe.clone()), $crate::abort::guard($body))).await {
               ::std::result::Result::Ok(val) => break 'retry ::std::result::Result::Ok(val),
               ::std::result::Result::Err(e @ $crate::error::FerriError::Aborted { .. }) => {
-                __call_log.push(format!("operation was aborted: {e}"));
-                break 'retry ::std::result::Result::Err(e.with_call_log(::std::mem::take(&mut __call_log)));
+                __call_log.push_aborted(&e);
+                break 'retry ::std::result::Result::Err(e.with_call_log(__call_log.into_vec()));
               },
               ::std::result::Result::Err(e) => {
                 let __msg = e.to_string();
@@ -221,13 +227,10 @@ macro_rules! retry_resolve {
                   // stale-handle backend errors (the node detached
                   // mid-action). Keep re-resolving until the deadline.
                   let __line = $crate::locator::action_log_line(&__msg);
-                  if __line != __trace_last_log {
-                    __call_log.push(format!("  {__line}"));
-                    __call_log.push(format!("retrying {} action", __op_name));
-                    if let ::std::option::Option::Some(__s) = __trace_span.as_ref() {
-                      __s.log(__line.clone());
-                    }
-                    __trace_last_log = __line;
+                  if __call_log.record_retry(&__line)
+                    && let ::std::option::Option::Some(__s) = __trace_span.as_ref()
+                  {
+                    __s.log(__line);
                   }
                 } else if !__expired() {
                   break 'retry ::std::result::Result::Err($crate::error::FerriError::from(e));
@@ -295,15 +298,75 @@ enum PointerPrepVerdict {
   },
 }
 
-fn record_retry_log(call_log: &mut Vec<String>, last_log: &mut String, line: &str, op_name: &str) {
-  if call_log.len() == 1 {
-    call_log.push(format!("attempting {op_name} action"));
+/// Lazy Playwright `Call log:` builder. Allocates nothing and skips
+/// `as_locator` selector parsing unless the action actually traces, retries,
+/// aborts, or times out.
+pub(crate) struct LazyCallLog<'a> {
+  selector: &'a str,
+  op_name: &'a str,
+  attempted: bool,
+  lines: Vec<String>,
+  last_line: String,
+}
+
+impl<'a> LazyCallLog<'a> {
+  pub(crate) fn new(selector: &'a str, op_name: &'a str) -> Self {
+    Self {
+      selector,
+      op_name,
+      attempted: false,
+      lines: Vec::new(),
+      last_line: String::new(),
+    }
   }
-  if line != last_log.as_str() {
-    call_log.push(format!("  {line}"));
-    call_log.push(format!("retrying {op_name} action"));
-    last_log.clear();
-    last_log.push_str(line);
+
+  fn ensure_header(&mut self) {
+    if self.lines.is_empty() {
+      self.lines.push(format!(
+        "waiting for {}",
+        crate::locator_generator::as_locator(self.selector)
+      ));
+      if self.attempted {
+        self.lines.push(format!("attempting {} action", self.op_name));
+      }
+    }
+  }
+
+  pub(crate) fn waiting_line(&mut self) -> &str {
+    self.ensure_header();
+    self.lines.first().map_or("", String::as_str)
+  }
+
+  pub(crate) fn mark_attempted(&mut self) {
+    if !self.attempted {
+      self.attempted = true;
+      if self.lines.len() == 1 {
+        self.lines.push(format!("attempting {} action", self.op_name));
+      }
+    }
+  }
+
+  pub(crate) fn record_retry(&mut self, line: &str) -> bool {
+    if line == self.last_line.as_str() {
+      return false;
+    }
+    self.attempted = true;
+    self.ensure_header();
+    self.lines.push(format!("  {line}"));
+    self.lines.push(format!("retrying {} action", self.op_name));
+    self.last_line.clear();
+    self.last_line.push_str(line);
+    true
+  }
+
+  pub(crate) fn push_aborted(&mut self, error: &crate::error::FerriError) {
+    self.ensure_header();
+    self.lines.push(format!("operation was aborted: {error}"));
+  }
+
+  pub(crate) fn into_vec(mut self) -> Vec<String> {
+    self.ensure_header();
+    self.lines
   }
 }
 
@@ -1227,11 +1290,7 @@ impl Locator {
     let expired = || deadline.is_some_and(|d| std::time::Instant::now() >= d);
     let value_lit = serde_json::to_string(value)?;
     let force = opts.is_force();
-    let mut call_log = vec![format!(
-      "waiting for {}",
-      crate::locator_generator::as_locator(&self.selector)
-    )];
-    let mut last_log = String::new();
+    let mut call_log = LazyCallLog::new(&self.selector, "fill");
     let budget = crate::operation_budget::OperationBudget::operation(timeout)?;
     budget
       .scope(async {
@@ -1277,7 +1336,7 @@ impl Locator {
               Some("needsinput") => return inner.insert_text(value).await,
               Some("error:notfound") | None => {},
               Some(state) => {
-                record_retry_log(&mut call_log, &mut last_log, &action_log_line(state), "fill");
+                call_log.record_retry(&action_log_line(state));
               },
             }
           }
@@ -1285,10 +1344,10 @@ impl Locator {
         .await;
         match outcome {
           Err(e @ crate::error::FerriError::Aborted { .. }) => {
-            call_log.push(format!("operation was aborted: {e}"));
-            Err(e.with_call_log(call_log))
+            call_log.push_aborted(&e);
+            Err(e.with_call_log(call_log.into_vec()))
           },
-          Err(e @ crate::error::FerriError::Timeout { .. }) => Err(e.with_call_log(call_log)),
+          Err(e @ crate::error::FerriError::Timeout { .. }) => Err(e.with_call_log(call_log.into_vec())),
           other => other,
         }
       })
@@ -1494,11 +1553,7 @@ impl Locator {
     let deadline = (timeout != 0).then(|| std::time::Instant::now() + std::time::Duration::from_millis(timeout));
     let expired = || deadline.is_some_and(|d| std::time::Instant::now() >= d);
     let args = crate::backend::BackendClickArgs::from_options(opts);
-    let mut call_log = vec![format!(
-      "waiting for {}",
-      crate::locator_generator::as_locator(&self.selector)
-    )];
-    let mut last_log = String::new();
+    let mut call_log = LazyCallLog::new(&self.selector, op_name);
     let budget = crate::operation_budget::OperationBudget::operation(timeout)?;
     budget
       .scope(async {
@@ -1529,7 +1584,7 @@ impl Locator {
               Ok(PointerPrepVerdict::AlreadyDone) => return Ok(()),
               Ok(PointerPrepVerdict::Retry(line)) => {
                 tries = tries.saturating_add(1);
-                record_retry_log(&mut call_log, &mut last_log, &line, op_name);
+                call_log.record_retry(&line);
                 continue;
               },
               Ok(PointerPrepVerdict::Ready {
@@ -1553,7 +1608,7 @@ impl Locator {
             match outcome {
               Ok(()) => return Ok(()),
               Err(e) if retries(&e) => {
-                record_retry_log(&mut call_log, &mut last_log, &action_log_line(&e.to_string()), op_name);
+                call_log.record_retry(&action_log_line(&e.to_string()));
               },
               Err(e) if !expired() => return Err(e),
               Err(_) => {},
@@ -1563,10 +1618,10 @@ impl Locator {
         .await;
         match outcome {
           Err(e @ crate::error::FerriError::Aborted { .. }) => {
-            call_log.push(format!("operation was aborted: {e}"));
-            Err(e.with_call_log(call_log))
+            call_log.push_aborted(&e);
+            Err(e.with_call_log(call_log.into_vec()))
           },
-          Err(e @ crate::error::FerriError::Timeout { .. }) => Err(e.with_call_log(call_log)),
+          Err(e @ crate::error::FerriError::Timeout { .. }) => Err(e.with_call_log(call_log.into_vec())),
           other => other,
         }
       })

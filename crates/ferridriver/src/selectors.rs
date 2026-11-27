@@ -833,16 +833,17 @@ pub async fn query_all(page: &AnyPage, selector: &str, frame_id: Option<&str>) -
   .and_then(|v| v.as_str().map(std::string::ToString::to_string))
   .unwrap_or_else(|| "[]".into());
 
-  // Single parse: probe the error shape on the `Value`, then
-  // deserialize the match list from it — parsing the full result
-  // string twice doubled the cost for large match sets.
-  let val: serde_json::Value =
-    serde_json::from_str(&result_str).map_err(|e| FerriError::Backend(format!("Parse selector results: {e}")))?;
-  if let Some(err) = val.get("error").and_then(|e| e.as_str()) {
-    return Err(FerriError::evaluation(err.to_string()));
+  // Stream directly into `Vec<MatchedElement>` on the happy array path,
+  // avoiding an intermediate `serde_json::Value` tree for large match sets.
+  if result_str.trim_start().starts_with('{') {
+    let val: serde_json::Value =
+      serde_json::from_str(&result_str).map_err(|e| FerriError::Backend(format!("Parse selector results: {e}")))?;
+    if let Some(err) = val.get("error").and_then(|e| e.as_str()) {
+      return Err(FerriError::evaluation(err.to_string()));
+    }
   }
   let elements: Vec<MatchedElement> =
-    serde_json::from_value(val).map_err(|e| FerriError::Backend(format!("Parse selector results: {e}")))?;
+    serde_json::from_str(&result_str).map_err(|e| FerriError::Backend(format!("Parse selector results: {e}")))?;
   Ok(elements)
 }
 

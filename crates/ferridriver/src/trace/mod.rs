@@ -84,6 +84,9 @@ pub(crate) fn install_recorder(composite: &str, recorder: Arc<TraceRecorder>) ->
 /// The active recorder for `composite`, if tracing.
 #[must_use]
 pub(crate) fn recorder_for(composite: &str) -> Option<Arc<TraceRecorder>> {
+  if !RECORDING_ACTIVE.load(Ordering::Acquire) {
+    return None;
+  }
   RECORDERS
     .read()
     .unwrap_or_else(std::sync::PoisonError::into_inner)
