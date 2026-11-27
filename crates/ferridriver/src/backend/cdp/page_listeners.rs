@@ -480,27 +480,27 @@ impl CdpPage {
           },
           "Network.webSocketCreated" => {
             if let Some(p) = params {
-              tracker.on_websocket_created(p, &emitter).await;
+              tracker.on_websocket_created(p, &emitter);
             }
           },
           "Network.webSocketFrameSent" => {
             if let Some(p) = params {
-              tracker.on_websocket_frame_sent(p).await;
+              tracker.on_websocket_frame_sent(p);
             }
           },
           "Network.webSocketFrameReceived" => {
             if let Some(p) = params {
-              tracker.on_websocket_frame_received(p).await;
+              tracker.on_websocket_frame_received(p);
             }
           },
           "Network.webSocketFrameError" => {
             if let Some(p) = params {
-              tracker.on_websocket_error(p).await;
+              tracker.on_websocket_error(p);
             }
           },
           "Network.webSocketClosed" => {
             if let Some(p) = params {
-              tracker.on_websocket_closed(p).await;
+              tracker.on_websocket_closed(p);
             }
           },
           _ => {},

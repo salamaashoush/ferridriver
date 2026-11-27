@@ -17,13 +17,29 @@ pub(super) struct NetworkTracker {
   /// its `page_guid` for context-level page attribution (HAR pages,
   /// page-scoped HAR update recording).
   target_id: Arc<str>,
-  requests: tokio::sync::Mutex<FxHashMap<String, network::Request>>,
-  responses: tokio::sync::Mutex<FxHashMap<String, Response>>,
-  websockets: tokio::sync::Mutex<FxHashMap<String, WebSocket>>,
+  requests: std::sync::Mutex<FxHashMap<String, network::Request>>,
+  responses: std::sync::Mutex<FxHashMap<String, Response>>,
+  websockets: std::sync::Mutex<FxHashMap<String, WebSocket>>,
   // Buffered extra-info events that may arrive before the main events.
-  pending_request_extra: tokio::sync::Mutex<FxHashMap<String, Vec<HeaderEntry>>>,
-  pending_response_extra: tokio::sync::Mutex<FxHashMap<String, Vec<HeaderEntry>>>,
+  pending_request_extra: std::sync::Mutex<FxHashMap<String, Vec<HeaderEntry>>>,
+  pending_response_extra: std::sync::Mutex<FxHashMap<String, Vec<HeaderEntry>>>,
   nav_request_slot: crate::network::NavRequestSlot,
+}
+
+fn lock_map<T>(mutex: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+  mutex.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// Build an optional raw-headers fallback for provisional CDP headers without
+/// capturing the [`NetworkTracker`] (which would form an `Arc` cycle through
+/// `requests`/`responses`). When no provisional value carries CDP's `\n`
+/// multi-value join, `None` lets [`Request`]/[`Response`] fall back directly
+/// to `provisional_headers` with zero closure allocation.
+fn provisional_raw_headers_fn(headers: &Headers) -> Option<RawHeadersFn> {
+  headers
+    .values()
+    .any(|v| v.contains('\n'))
+    .then(|| crate::network::known_raw_headers(crate::network::headers_map_to_split_array(headers, "\n", "\n")))
 }
 
 impl NetworkTracker {
@@ -37,11 +53,11 @@ impl NetworkTracker {
       transport,
       session_id,
       target_id,
-      requests: tokio::sync::Mutex::new(FxHashMap::default()),
-      responses: tokio::sync::Mutex::new(FxHashMap::default()),
-      websockets: tokio::sync::Mutex::new(FxHashMap::default()),
-      pending_request_extra: tokio::sync::Mutex::new(FxHashMap::default()),
-      pending_response_extra: tokio::sync::Mutex::new(FxHashMap::default()),
+      requests: std::sync::Mutex::new(FxHashMap::default()),
+      responses: std::sync::Mutex::new(FxHashMap::default()),
+      websockets: std::sync::Mutex::new(FxHashMap::default()),
+      pending_request_extra: std::sync::Mutex::new(FxHashMap::default()),
+      pending_response_extra: std::sync::Mutex::new(FxHashMap::default()),
       nav_request_slot,
     }
   }
@@ -100,8 +116,8 @@ impl NetworkTracker {
     // to it via redirected_from. Same CDP requestId is reused for the
     // chain, so we re-key the prior in the tracker map.
     let redirected_from = if let Some(redirect_resp) = params.get("redirectResponse") {
-      let mut requests = self.requests.lock().await;
-      if let Some(prev) = requests.remove(&request_id) {
+      let prev = lock_map(&self.requests).remove(&request_id);
+      if let Some(prev) = prev {
         let synthesised = self.build_response_from_value(prev.clone(), redirect_resp, &request_id);
         prev.set_response(&synthesised).await;
         synthesised.finish_success().await;
@@ -115,7 +131,7 @@ impl NetworkTracker {
       None
     };
 
-    let raw_headers_fn = self.make_request_raw_headers_fn(&request_id);
+    let raw_headers_fn = provisional_raw_headers_fn(&headers);
 
     // `wallTime` is epoch seconds — the one wall-clock sample CDP
     // provides for a request (`ResourceTiming.requestTime` is monotonic).
@@ -140,15 +156,15 @@ impl NetworkTracker {
       page_guid: Some(self.target_id.to_string()),
       redirected_from,
       timing,
-      raw_headers_fn: Some(raw_headers_fn),
+      raw_headers_fn,
     });
 
-    let extras = self.pending_request_extra.lock().await.remove(&request_id);
+    let extras = lock_map(&self.pending_request_extra).remove(&request_id);
     if let Some(extras) = extras {
       new_request.set_raw_headers(extras).await;
     }
 
-    self.requests.lock().await.insert(request_id, new_request.clone());
+    lock_map(&self.requests).insert(request_id, new_request.clone());
 
     // Main-document navigations: update the per-page slot so
     // `AnyPage::goto` / `reload` / history traversals can resolve the
@@ -176,15 +192,11 @@ impl NetworkTracker {
       return;
     };
     let raw = parse_raw_headers(params.get("headers"));
-    let req = self.requests.lock().await.get(request_id).cloned();
+    let req = lock_map(&self.requests).get(request_id).cloned();
     if let Some(req) = req {
       req.set_raw_headers(raw).await;
     } else {
-      self
-        .pending_request_extra
-        .lock()
-        .await
-        .insert(request_id.to_string(), raw);
+      lock_map(&self.pending_request_extra).insert(request_id.to_string(), raw);
     }
   }
 
@@ -196,19 +208,18 @@ impl NetworkTracker {
     let Some(request_id) = params.get("requestId").and_then(|v| v.as_str()) else {
       return;
     };
-    let request_id = request_id.to_string();
-    let Some(req) = self.requests.lock().await.get(&request_id).cloned() else {
+    let Some(req) = lock_map(&self.requests).get(request_id).cloned() else {
       return;
     };
     let Some(resp_value) = params.get("response") else {
       return;
     };
-    let response = self.build_response_from_value(req.clone(), resp_value, &request_id);
-    let extras = self.pending_response_extra.lock().await.remove(&request_id);
+    let response = self.build_response_from_value(req.clone(), resp_value, request_id);
+    let extras = lock_map(&self.pending_response_extra).remove(request_id);
     if let Some(extras) = extras {
       response.set_raw_headers(extras).await;
     }
-    self.responses.lock().await.insert(request_id, response.clone());
+    lock_map(&self.responses).insert(request_id.to_string(), response.clone());
     req.set_response(&response).await;
     emitter.emit(crate::events::PageEvent::Response(response));
   }
@@ -218,15 +229,11 @@ impl NetworkTracker {
       return;
     };
     let raw = parse_raw_headers(params.get("headers"));
-    let resp = self.responses.lock().await.get(request_id).cloned();
+    let resp = lock_map(&self.responses).get(request_id).cloned();
     if let Some(resp) = resp {
       resp.set_raw_headers(raw).await;
     } else {
-      self
-        .pending_response_extra
-        .lock()
-        .await
-        .insert(request_id.to_string(), raw);
+      lock_map(&self.pending_response_extra).insert(request_id.to_string(), raw);
     }
   }
 
@@ -238,7 +245,7 @@ impl NetworkTracker {
     let Some(request_id) = params.get("requestId").and_then(|v| v.as_str()) else {
       return;
     };
-    let Some(req) = self.requests.lock().await.get(request_id).cloned() else {
+    let Some(req) = lock_map(&self.requests).get(request_id).cloned() else {
       return;
     };
     let total_encoded = params
@@ -256,7 +263,7 @@ impl NetworkTracker {
         ..RequestSizes::default()
       });
     }
-    let resp = self.responses.lock().await.get(request_id).cloned();
+    let resp = lock_map(&self.responses).get(request_id).cloned();
     if let Some(resp) = resp {
       resp.finish_success().await;
     }
@@ -271,7 +278,7 @@ impl NetworkTracker {
     let Some(request_id) = params.get("requestId").and_then(|v| v.as_str()) else {
       return;
     };
-    let Some(req) = self.requests.lock().await.get(request_id).cloned() else {
+    let Some(req) = lock_map(&self.requests).get(request_id).cloned() else {
       return;
     };
     let error_text = params
@@ -280,14 +287,14 @@ impl NetworkTracker {
       .unwrap_or("net::ERR_FAILED")
       .to_string();
     req.set_failure(error_text.clone());
-    let resp = self.responses.lock().await.get(request_id).cloned();
+    let resp = lock_map(&self.responses).get(request_id).cloned();
     if let Some(resp) = resp {
       resp.finish_failure(error_text).await;
     }
     emitter.emit(crate::events::PageEvent::RequestFailed(req));
   }
 
-  pub(super) async fn on_websocket_created(
+  pub(super) fn on_websocket_created(
     self: &Arc<Self>,
     params: &serde_json::Value,
     emitter: &crate::events::EventEmitter,
@@ -297,35 +304,35 @@ impl NetworkTracker {
     };
     let url = params.get("url").and_then(|v| v.as_str()).unwrap_or("").to_string();
     let ws = WebSocket::new(url);
-    self.websockets.lock().await.insert(request_id.to_string(), ws.clone());
+    lock_map(&self.websockets).insert(request_id.to_string(), ws.clone());
     emitter.emit(crate::events::PageEvent::WebSocket(ws));
   }
 
-  pub(super) async fn on_websocket_frame_sent(self: &Arc<Self>, params: &serde_json::Value) {
+  pub(super) fn on_websocket_frame_sent(self: &Arc<Self>, params: &serde_json::Value) {
     let Some(request_id) = params.get("requestId").and_then(|v| v.as_str()) else {
       return;
     };
     let Some(payload) = crate::network::websocket_frame_payload(params) else {
       return;
     };
-    if let Some(ws) = self.websockets.lock().await.get(request_id) {
+    if let Some(ws) = lock_map(&self.websockets).get(request_id) {
       ws.emit_frame_sent(payload);
     }
   }
 
-  pub(super) async fn on_websocket_frame_received(self: &Arc<Self>, params: &serde_json::Value) {
+  pub(super) fn on_websocket_frame_received(self: &Arc<Self>, params: &serde_json::Value) {
     let Some(request_id) = params.get("requestId").and_then(|v| v.as_str()) else {
       return;
     };
     let Some(payload) = crate::network::websocket_frame_payload(params) else {
       return;
     };
-    if let Some(ws) = self.websockets.lock().await.get(request_id) {
+    if let Some(ws) = lock_map(&self.websockets).get(request_id) {
       ws.emit_frame_received(payload);
     }
   }
 
-  pub(super) async fn on_websocket_error(self: &Arc<Self>, params: &serde_json::Value) {
+  pub(super) fn on_websocket_error(self: &Arc<Self>, params: &serde_json::Value) {
     let Some(request_id) = params.get("requestId").and_then(|v| v.as_str()) else {
       return;
     };
@@ -334,16 +341,16 @@ impl NetworkTracker {
       .and_then(|v| v.as_str())
       .unwrap_or("WebSocket error")
       .to_string();
-    if let Some(ws) = self.websockets.lock().await.get(request_id) {
+    if let Some(ws) = lock_map(&self.websockets).get(request_id) {
       ws.emit_error(msg);
     }
   }
 
-  pub(super) async fn on_websocket_closed(self: &Arc<Self>, params: &serde_json::Value) {
+  pub(super) fn on_websocket_closed(self: &Arc<Self>, params: &serde_json::Value) {
     let Some(request_id) = params.get("requestId").and_then(|v| v.as_str()) else {
       return;
     };
-    let ws = self.websockets.lock().await.remove(request_id);
+    let ws = lock_map(&self.websockets).remove(request_id);
     if let Some(ws) = ws {
       ws.emit_close();
     }
@@ -405,7 +412,7 @@ impl NetworkTracker {
     request.update_timing(timing);
 
     let body_fn = self.make_response_body_fn(request_id);
-    let raw_headers_fn = self.make_response_raw_headers_fn(request_id);
+    let raw_headers_fn = provisional_raw_headers_fn(&headers);
 
     Response::new(ResponseInit {
       request,
@@ -418,7 +425,7 @@ impl NetworkTracker {
       remote_addr,
       security_details: security,
       body_fn: Some(body_fn),
-      raw_headers_fn: Some(raw_headers_fn),
+      raw_headers_fn,
     })
   }
 
@@ -450,44 +457,6 @@ impl NetworkTracker {
         } else {
           Ok(resp.body.into_bytes())
         }
-      })
-    })
-  }
-
-  fn make_request_raw_headers_fn(self: &Arc<Self>, request_id: &str) -> RawHeadersFn {
-    let tracker = Arc::clone(self);
-    let request_id = request_id.to_string();
-    Arc::new(move || {
-      let tracker = Arc::clone(&tracker);
-      let request_id = request_id.clone();
-      Box::pin(async move {
-        // Fall back to whatever headers the request currently has if no
-        // extraInfo arrived (matches Playwright when CDP doesn't fire
-        // it, e.g. in Service-Worker-served responses). The PROVISIONAL
-        // ones specifically: `headers_array()` resolves through this
-        // closure, so reading it here would not terminate. Split the
-        // same way `parse_raw_headers` splits the pushed ones, so a
-        // repeated header survives whichever path delivered it.
-        if let Some(req) = tracker.requests.lock().await.get(&request_id) {
-          return Ok(crate::network::headers_map_to_split_array(&req.headers(), "\n", "\n"));
-        }
-        Ok(Vec::new())
-      })
-    })
-  }
-
-  fn make_response_raw_headers_fn(self: &Arc<Self>, request_id: &str) -> RawHeadersFn {
-    let tracker = Arc::clone(self);
-    let request_id = request_id.to_string();
-    Arc::new(move || {
-      let tracker = Arc::clone(&tracker);
-      let request_id = request_id.clone();
-      Box::pin(async move {
-        // Provisional, split, for the reason the request fallback is.
-        if let Some(resp) = tracker.responses.lock().await.get(&request_id) {
-          return Ok(crate::network::headers_map_to_split_array(&resp.headers(), "\n", "\n"));
-        }
-        Ok(Vec::new())
       })
     })
   }
@@ -608,4 +577,79 @@ pub(super) fn cookie_to_cdp(cookie: &CookieData) -> serde_json::Value {
     params["sameSite"] = serde_json::json!(ss.as_str());
   }
   params
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use crate::backend::cdp::transport::CdpDispatcher;
+
+  #[tokio::test]
+  async fn tracker_drops_cleanly_without_arc_cycle_and_splits_multiline_provisional_headers() {
+    let dispatcher = Arc::new(CdpDispatcher::new());
+    let transport = Arc::new(CdpTransport::from_test_dispatcher(dispatcher));
+    let tracker = Arc::new(NetworkTracker::new(
+      transport,
+      Some(Arc::from("sid-1")),
+      Arc::from("target-1"),
+      crate::network::NavRequestSlot::new(),
+    ));
+    let weak = Arc::downgrade(&tracker);
+    let network_log = Arc::new(RwLock::new(Vec::new()));
+    let emitter = crate::events::EventEmitter::new();
+
+    tracker
+      .on_request_will_be_sent(
+        &serde_json::json!({
+          "requestId": "req-1",
+          "request": {
+            "url": "https://example.test/api",
+            "method": "GET",
+            "headers": {
+              "X-Multi": "one\ntwo",
+              "Accept": "*/*"
+            }
+          },
+          "type": "Fetch"
+        }),
+        &network_log,
+        &emitter,
+      )
+      .await;
+    tracker
+      .on_response_received(
+        &serde_json::json!({
+          "requestId": "req-1",
+          "response": {
+            "url": "https://example.test/api",
+            "status": 200,
+            "statusText": "OK",
+            "headers": {
+              "Set-Cookie": "a=1\nb=2"
+            }
+          }
+        }),
+        &emitter,
+      )
+      .await;
+
+    let req = network_log.read().await[0].clone();
+    let req_headers = req.headers_array().await;
+    let multi_vals: Vec<&str> = req_headers
+      .iter()
+      .filter(|h| h.name.eq_ignore_ascii_case("x-multi"))
+      .map(|h| h.value.as_str())
+      .collect();
+    assert_eq!(multi_vals, vec!["one", "two"]);
+
+    let resp = req.existing_response().await.expect("response attached");
+    let cookies = resp.header_values("set-cookie").await.expect("response cookies");
+    assert_eq!(cookies, vec!["a=1", "b=2"]);
+
+    drop(tracker);
+    assert!(
+      weak.upgrade().is_none(),
+      "NetworkTracker must not retain a strong Arc cycle through tracked requests/responses"
+    );
+  }
 }
