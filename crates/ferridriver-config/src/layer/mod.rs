@@ -48,6 +48,12 @@
 //! alone: they stay relative to the run's `testDir`/cwd, matching
 //! Playwright.
 
+mod discover;
+mod merge;
+mod paths;
+#[cfg(test)]
+mod tests;
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -56,39 +62,12 @@ use serde::Serialize;
 use serde_json::{Map, Value};
 
 use crate::FerridriverConfig;
+use discover::discover_layers;
+use merge::{apply_env, camel_case_segment, merge};
+use paths::{anchor_paths, normalize, resolve_against};
 
-/// Config file basenames searched for a project/cwd layer, in format
-/// precedence order.
-const PROJECT_BASENAMES: &[&str] = &[
-  "ferridriver.toml",
-  "ferridriver.yaml",
-  "ferridriver.yml",
-  "ferridriver.json",
-  "ferridriver.config.ts",
-  "ferridriver.config.mts",
-  "ferridriver.config.js",
-  "ferridriver.config.mjs",
-];
-
-/// Personal-override basenames, searched alongside [`PROJECT_BASENAMES`].
-const LOCAL_BASENAMES: &[&str] = &[
-  "ferridriver.local.toml",
-  "ferridriver.local.yaml",
-  "ferridriver.local.yml",
-  "ferridriver.local.json",
-  "ferridriver.local.ts",
-  "ferridriver.local.js",
-];
-
-/// Basenames searched inside a machine/user config DIRECTORY.
-const DIR_BASENAMES: &[&str] = &[
-  "config.toml",
-  "config.yaml",
-  "config.yml",
-  "config.json",
-  "config.ts",
-  "config.js",
-];
+pub use merge::merge_documents;
+pub use paths::normalize_path;
 
 /// Array keys that concatenate across layers instead of replacing.
 /// Matched on the leaf key name at any depth.
@@ -99,32 +78,14 @@ const DIR_BASENAMES: &[&str] = &[
 /// a layer that redefines them is redefining a whole policy.
 pub const APPEND_KEYS: &[&str] = &["paths", "sidecars", "chromeArgs", "args", "allowEnv"];
 
-/// Leaf key names whose string value is a filesystem path and is
-/// therefore anchored to its own config file's directory.
-const PATH_KEYS: &[&str] = &[
-  "scriptRoot",
-  "artifactsRoot",
-  "executablePath",
-  "userDataDir",
-  "discoverProfile",
-  "testDir",
-  "outputDir",
-  "snapshotDir",
-  "tsconfig",
-  "storageState",
-  "cwd",
-];
-
-/// Leaf key names holding an ARRAY of filesystem paths.
-const PATH_ARRAY_KEYS: &[&str] = &["globalSetup", "globalTeardown"];
-
-/// Keys Playwright spells `string | string[]`, both forms holding paths.
-const PATH_STRING_OR_ARRAY_KEYS: &[&str] = &["stylePath"];
-
-/// Keys whose object value is keyed by the OPERATOR, not by the schema.
-/// Their contents are data, so no key inside them may be read as a path
-/// name.
-const OPAQUE_MAP_KEYS: &[&str] = &["env", "headers", "extraHTTPHeaders", "settings", "worldParameters"];
+/// Keys a document may write outside the schema, folded into the schema
+/// by `normalize` before anything deserializes.
+///
+/// `use` at the top of `[test]` is where Playwright puts it, and it is
+/// the same bag as `[test.browser].use`; a config module writing one
+/// gets the other. The authoring `.d.ts` declares the alias, so the
+/// contract test reads it from here rather than carrying its own copy.
+pub const DOCUMENT_ALIASES: &[&str] = &["use"];
 
 /// Which slot in the stack a layer occupied.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -201,7 +162,7 @@ pub struct ConfigWarning {
 
 /// Where each resolved key came from, accumulated while merging.
 #[derive(Debug, Default)]
-struct Provenance {
+pub(super) struct Provenance {
   /// Dotted key -> the origin whose value won.
   winners: BTreeMap<String, Origin>,
   /// Dotted key -> every origin that added to a concatenated array.
@@ -209,11 +170,11 @@ struct Provenance {
 }
 
 impl Provenance {
-  fn win(&mut self, path: &str, origin: &Origin) {
+  pub(super) fn win(&mut self, path: &str, origin: &Origin) {
     self.winners.insert(path.to_string(), origin.clone());
   }
 
-  fn contributed(&mut self, path: &str, origin: &Origin) {
+  pub(super) fn contributed(&mut self, path: &str, origin: &Origin) {
     let entries = self.contributors.entry(path.to_string()).or_default();
     if entries.last() != Some(origin) {
       entries.push(origin.clone());
@@ -596,211 +557,6 @@ pub fn resolve(opts: &LoadOptions) -> anyhow::Result<Resolved> {
   })
 }
 
-/// Build the ordered list of files to apply, before `extends`
-/// expansion.
-/// The `--config` file, made absolute against the run's cwd. Relative
-/// paths inside a layer anchor to the layer's directory, and a directory
-/// taken from a relative `--config` stayed relative to the cwd: `testDir`
-/// came out cwd-relative, and the snapshot template, which resolves a
-/// relative `{testDir}` against the config's directory, prefixed it again.
-fn explicit_layer_path(opts: &LoadOptions) -> Option<PathBuf> {
-  let path = opts.explicit.as_ref()?;
-  Some(if path.is_absolute() {
-    path.clone()
-  } else {
-    normalize_path(&opts.cwd.join(path))
-  })
-}
-
-fn discover_layers(opts: &LoadOptions, warnings: &mut Vec<ConfigWarning>) -> Vec<ConfigLayer> {
-  if !opts.inherit {
-    return match explicit_layer_path(opts) {
-      Some(path) => vec![ConfigLayer {
-        kind: LayerKind::Explicit,
-        path,
-      }],
-      None => highest_precedence_file(opts, warnings),
-    };
-  }
-
-  let mut layers = Vec::new();
-
-  if let Some(dir) = &opts.machine_config_dir {
-    for path in first_existing_reported(&dir.join("ferridriver"), DIR_BASENAMES, warnings) {
-      layers.push(ConfigLayer {
-        kind: LayerKind::Machine,
-        path,
-      });
-    }
-  }
-
-  if let Some(dir) = &opts.user_config_dir {
-    for path in first_existing_reported(&dir.join("ferridriver"), DIR_BASENAMES, warnings) {
-      layers.push(ConfigLayer {
-        kind: LayerKind::User,
-        path,
-      });
-    }
-  }
-
-  // Every ancestor between the repository root and the cwd may carry a
-  // config, applied outermost first so the NEAREST one wins. That is
-  // what makes a monorepo work: the root sets shared defaults, a
-  // package overrides just its own keys.
-  let git_root = find_git_root(&opts.cwd);
-  for dir in ancestor_chain(git_root.as_deref(), &opts.cwd) {
-    for path in first_existing_reported(&dir, PROJECT_BASENAMES, warnings) {
-      layers.push(ConfigLayer {
-        kind: LayerKind::Project,
-        path,
-      });
-    }
-  }
-
-  for path in first_existing_reported(&opts.cwd, PROJECT_BASENAMES, warnings) {
-    layers.push(ConfigLayer {
-      kind: LayerKind::Cwd,
-      path,
-    });
-  }
-
-  for dir in ancestor_chain(git_root.as_deref(), &opts.cwd) {
-    for path in first_existing_reported(&dir, LOCAL_BASENAMES, warnings) {
-      layers.push(ConfigLayer {
-        kind: LayerKind::Local,
-        path,
-      });
-    }
-  }
-  for path in first_existing_reported(&opts.cwd, LOCAL_BASENAMES, warnings) {
-    layers.push(ConfigLayer {
-      kind: LayerKind::Local,
-      path,
-    });
-  }
-
-  if let Some(path) = &explicit_layer_path(opts) {
-    if path.exists() {
-      layers.push(ConfigLayer {
-        kind: LayerKind::Explicit,
-        path: path.clone(),
-      });
-    } else {
-      warnings.push(ConfigWarning {
-        source: path.display().to_string(),
-        message: "config file named by --config does not exist".to_string(),
-      });
-    }
-  }
-
-  layers
-}
-
-/// The single file a non-inheriting load would use: the cwd's own
-/// config, and nothing else.
-///
-/// Deliberately does NOT fall back to the user or machine directory —
-/// "no inherit" has to mean it, or a reproducible run would still pick
-/// up whatever an operator installed under `~/.config`.
-fn highest_precedence_file(opts: &LoadOptions, warnings: &mut Vec<ConfigWarning>) -> Vec<ConfigLayer> {
-  let local: Vec<ConfigLayer> = first_existing_reported(&opts.cwd, LOCAL_BASENAMES, warnings)
-    .into_iter()
-    .map(|path| ConfigLayer {
-      kind: LayerKind::Local,
-      path,
-    })
-    .collect();
-  if !local.is_empty() {
-    return local;
-  }
-  first_existing_reported(&opts.cwd, PROJECT_BASENAMES, warnings)
-    .into_iter()
-    .map(|path| ConfigLayer {
-      kind: LayerKind::Cwd,
-      path,
-    })
-    .collect()
-}
-
-/// The configs `dir` contributes: at most one DOCUMENT and at most one
-/// MODULE, document first so the module folds on top of it.
-///
-/// A directory carries both when it has to. `extensions`, `[bundler]`
-/// and `[extensions.policy]` are resolved before any module can be
-/// compiled — that is what the two-pass load exists for — so a suite
-/// whose config is a TypeScript module still needs a document beside it
-/// to name the packages that serve the module's own imports. Treating
-/// the pair as a shadow made that combination unexpressible: the
-/// document won and the module was reported as ignored.
-///
-/// Within a family the highest-precedence basename still wins alone and
-/// a shadowed sibling still warns. Silently taking `ferridriver.toml`
-/// while a `ferridriver.yaml` sits beside it makes every edit to the
-/// yaml look like it does nothing.
-fn first_existing_reported(dir: &Path, basenames: &[&str], warnings: &mut Vec<ConfigWarning>) -> Vec<PathBuf> {
-  // One `stat` per candidate, NOT one `read_dir`: the cost has to scale
-  // with the number of config formats, which is a fixed handful, and not
-  // with the number of files in the directory, which is unbounded.
-  // Listing the directory instead measured 29ms slower in a tree with
-  // 5000 files beside the config — and a repository root is exactly
-  // where a config lives.
-  let (documents, modules): (Vec<PathBuf>, Vec<PathBuf>) = basenames
-    .iter()
-    .map(|name| dir.join(name))
-    .filter(|c| c.is_file())
-    .partition(|c| !is_script_config(c));
-
-  let mut winners = Vec::new();
-  for family in [documents, modules] {
-    let mut family = family.into_iter();
-    let Some(winner) = family.next() else { continue };
-    let shadowed: Vec<String> = family.map(|p| p.display().to_string()).collect();
-    if !shadowed.is_empty() {
-      warnings.push(ConfigWarning {
-        source: winner.display().to_string(),
-        message: format!("also present and ignored: {}", shadowed.join(", ")),
-      });
-    }
-    winners.push(winner);
-  }
-  winners
-}
-
-/// Directories from `root` down to (but excluding) `cwd`, outermost
-/// first. Empty when there is no repository root, or when `cwd` IS the
-/// root — the cwd layer covers that case.
-fn ancestor_chain(root: Option<&Path>, cwd: &Path) -> Vec<PathBuf> {
-  let Some(root) = root else { return Vec::new() };
-  let mut chain = Vec::new();
-  let mut current = cwd.parent();
-  while let Some(dir) = current {
-    if !dir.starts_with(root) {
-      break;
-    }
-    chain.push(dir.to_path_buf());
-    if dir == root {
-      break;
-    }
-    current = dir.parent();
-  }
-  chain.reverse();
-  chain
-}
-
-/// Nearest ancestor of `from` (inclusive) containing a `.git` entry.
-fn find_git_root(from: &Path) -> Option<PathBuf> {
-  let mut dir = Some(from);
-  while let Some(current) = dir {
-    if current.join(".git").exists() {
-      return Some(current.to_path_buf());
-    }
-    dir = current.parent();
-  }
-  None
-}
-
-/// Read, normalize, anchor and merge one file, after recursively
-/// applying whatever it `extends`.
 /// The state one fold accumulates into, so `extends` recursion carries
 /// it in one place rather than as eight parallel arguments.
 struct Fold<'a> {
@@ -814,6 +570,8 @@ struct Fold<'a> {
   loader: Option<&'a ModuleLoader>,
 }
 
+/// Read, normalize, anchor and merge one file, after recursively
+/// applying whatever it `extends`.
 fn apply_layer(layer: &ConfigLayer, fold: &mut Fold<'_>) -> anyhow::Result<()> {
   let canonical = std::fs::canonicalize(&layer.path).unwrap_or_else(|_| layer.path.clone());
   if !fold.seen.insert(canonical) {
@@ -997,432 +755,6 @@ fn record_extension_bases(value: &Value, dir: &Path, bases: &mut BTreeMap<String
   }
 }
 
-/// Normalize shorthand shapes so merging sees one canonical structure.
-///
-/// `extensions = [..]` becomes `extensions = { paths = [..] }`, so a
-/// user layer using the shorthand and a project layer setting a policy
-/// combine instead of one clobbering the other.
-fn normalize(value: &mut Value) {
-  let Some(map) = value.as_object_mut() else { return };
-  if let Some(existing) = map.get_mut("extensions")
-    && existing.is_array()
-  {
-    let paths = std::mem::replace(existing, Value::Object(Map::new()));
-    if let Some(obj) = existing.as_object_mut() {
-      obj.insert("paths".to_string(), paths);
-    }
-  }
-  if let Some(test) = map.get_mut("test") {
-    normalize_test_section(test);
-  }
-}
-
-/// Keys a document may write outside the schema, folded into the schema
-/// by `normalize` before anything deserializes.
-///
-/// `use` at the top of `[test]` is where Playwright puts it, and it is
-/// the same bag as `[test.browser].use`; a config module writing one
-/// gets the other. The authoring `.d.ts` declares the alias, so the
-/// contract test reads it from here rather than carrying its own copy.
-pub const DOCUMENT_ALIASES: &[&str] = &["use"];
-
-/// Expand every `use` block in the `[test]` section, then fold the
-/// top-level one into the browser's.
-fn normalize_test_section(test: &mut Value) {
-  let Some(map) = test.as_object_mut() else { return };
-  expand_device(map.get_mut("use"));
-  if let Some(browser) = map.get_mut("browser").and_then(Value::as_object_mut) {
-    expand_device(browser.get_mut("use"));
-  }
-  if let Some(projects) = map.get_mut("projects").and_then(Value::as_array_mut) {
-    for project in projects {
-      let Some(project) = project.as_object_mut() else {
-        continue;
-      };
-      expand_device(project.get_mut("use"));
-      if let Some(browser) = project.get_mut("browser").and_then(Value::as_object_mut) {
-        expand_device(browser.get_mut("use"));
-      }
-    }
-  }
-  hoist_use(map);
-}
-
-/// Move `[test].use` into `[test.browser].use`, the one place the bag is
-/// stored. A key written in both spellings keeps the browser's, which is
-/// the more specific of the two.
-fn hoist_use(map: &mut Map<String, Value>) {
-  let Some(top) = map.remove("use") else { return };
-  let Some(top) = top.as_object().cloned() else {
-    // Not an object: put it back so deserialization reports it rather
-    // than dropping it here.
-    map.insert("use".to_string(), top);
-    return;
-  };
-  let browser = map
-    .entry("browser".to_string())
-    .or_insert_with(|| Value::Object(Map::new()));
-  let Some(browser) = browser.as_object_mut() else { return };
-  let target = browser
-    .entry("use".to_string())
-    .or_insert_with(|| Value::Object(Map::new()));
-  let Some(target) = target.as_object_mut() else { return };
-  for (key, value) in top {
-    target.entry(key).or_insert(value);
-  }
-}
-
-fn expand_device(block: Option<&mut Value>) {
-  if let Some(block) = block.and_then(Value::as_object_mut) {
-    crate::test::expand_device_keys(block);
-  }
-}
-
-/// Rewrite every relative filesystem path in `value` to be absolute
-/// against `dir`.
-fn anchor_paths(value: &mut Value, dir: &Path) {
-  match value {
-    Value::Object(map) => {
-      for (key, child) in map.iter_mut() {
-        match key.as_str() {
-          // Alias targets are shim files; virtual modules are inline
-          // source and must not be touched.
-          "alias" => anchor_map_values(child, dir),
-          "paths" => anchor_extension_specs(child, dir),
-          "virtualModules" | "virtual_modules" => {},
-          // `file` is too common a leaf name to anchor globally, so the
-          // secrets table anchors its own member.
-          "secrets" => anchor_member(child, "file", dir),
-          // Anchoring matches a LEAF KEY NAME at any depth, so a
-          // caller-keyed map must be skipped whole: an instance's env
-          // variable (or a request header) literally named `cwd` /
-          // `testDir` / `outputDir` would otherwise be rewritten into an
-          // absolute path behind the operator's back.
-          k if OPAQUE_MAP_KEYS.contains(&k) => {},
-          k if PATH_KEYS.contains(&k) => anchor_in_place(child, dir),
-          k if PATH_ARRAY_KEYS.contains(&k) => anchor_array(child, dir),
-          k if PATH_STRING_OR_ARRAY_KEYS.contains(&k) => {
-            if child.is_array() {
-              anchor_array(child, dir);
-            } else {
-              anchor_in_place(child, dir);
-            }
-          },
-          _ => anchor_paths(child, dir),
-        }
-      }
-    },
-    Value::Array(items) => {
-      for item in items.iter_mut() {
-        anchor_paths(item, dir);
-      }
-    },
-    _ => {},
-  }
-}
-
-/// Anchor exactly one named member of an object, leaving its siblings alone.
-fn anchor_member(value: &mut Value, member: &str, dir: &Path) {
-  if let Some(child) = value.as_object_mut().and_then(|map| map.get_mut(member)) {
-    anchor_in_place(child, dir);
-  }
-}
-
-fn anchor_map_values(value: &mut Value, dir: &Path) {
-  if let Some(map) = value.as_object_mut() {
-    for child in map.values_mut() {
-      anchor_in_place(child, dir);
-    }
-  }
-}
-
-fn anchor_array(value: &mut Value, dir: &Path) {
-  if let Some(items) = value.as_array_mut() {
-    for item in items.iter_mut() {
-      anchor_in_place(item, dir);
-    }
-  }
-}
-
-/// Anchor only the entries an extension spec resolver would treat as
-/// paths. A bare or scoped package specifier (`@acme/ext`) must stay a
-/// specifier so `node_modules` resolution still applies.
-///
-/// `~`-relative entries are expanded HERE rather than left for a later
-/// consumer: the extension resolver classifies anything that is not
-/// `./`, `../` or absolute as a package name, so an unexpanded
-/// `~/.config/...` entry failed with "extension package not found"
-/// instead of a missing-file error.
-fn anchor_extension_specs(value: &mut Value, dir: &Path) {
-  if let Some(items) = value.as_array_mut() {
-    for item in items.iter_mut() {
-      let Some(text) = item.as_str() else { continue };
-      if text.starts_with('~') {
-        *item = Value::String(shellexpand::tilde(text).into_owned());
-        continue;
-      }
-      if spec_looks_like_path(text) {
-        anchor_in_place(item, dir);
-      }
-    }
-  }
-}
-
-/// Mirrors `ferridriver_script::discover`'s path-vs-package rule.
-fn spec_looks_like_path(spec: &str) -> bool {
-  spec.starts_with("./") || spec.starts_with("../") || spec.starts_with('/') || spec == "." || spec == ".."
-}
-
-fn anchor_in_place(value: &mut Value, dir: &Path) {
-  if let Some(text) = value.as_str()
-    && let Some(resolved) = anchored(dir, text)
-  {
-    *value = Value::String(resolved);
-  }
-}
-
-/// The absolute form of `text` against `dir`, or `None` when it must be
-/// left alone: already absolute, `~`-relative (expanded later, by the
-/// consumer that knows about `~`), or carrying a `${VAR}` template a
-/// caller substitutes before use.
-fn anchored(dir: &Path, text: &str) -> Option<String> {
-  // `has_root`, not `is_absolute`: on Windows `/abs` names the current
-  // drive's root, which is not a path relative to the config.
-  if text.is_empty() || text.starts_with('~') || text.contains("${") || Path::new(text).has_root() {
-    return None;
-  }
-  Some(normalize_path(&dir.join(text)).to_string_lossy().into_owned())
-}
-
-fn resolve_against(dir: &Path, entry: &str) -> PathBuf {
-  let expanded = shellexpand::tilde(entry);
-  let path = Path::new(expanded.as_ref());
-  if path.is_absolute() {
-    path.to_path_buf()
-  } else {
-    normalize_path(&dir.join(path))
-  }
-}
-
-/// Lexically remove `.` and `..` components. Unlike `canonicalize`
-/// this does not require the path to exist, which matters for output
-/// directories a run has yet to create.
-///
-/// A `..` that would climb past the root is DROPPED, as the OS drops it
-/// (`/..` is `/`). Keeping it produced paths like `/../private/tmp/x`,
-/// which name the same file but compare as a prefix of nothing.
-#[must_use]
-pub fn normalize_path(path: &Path) -> PathBuf {
-  let mut out = PathBuf::new();
-  let mut rooted = false;
-  for component in path.components() {
-    match component {
-      std::path::Component::CurDir => {},
-      std::path::Component::ParentDir => {
-        if !out.pop() && !rooted {
-          out.push("..");
-        }
-      },
-      other => {
-        rooted |= matches!(other, std::path::Component::RootDir | std::path::Component::Prefix(_));
-        out.push(other.as_os_str());
-      },
-    }
-  }
-  out
-}
-
-/// Fold `overlay` onto `base` by the rules stacked config layers fold
-/// by: objects merge key by key, the [`APPEND_KEYS`] arrays concatenate,
-/// and every other value is replaced. `defineConfig` folds a config
-/// module's documents with this, so a `.ts` config combines exactly as
-/// `.toml` layers do. The whole module is one layer, so where each key
-/// came from is the module's file, recorded when the layer is applied.
-pub fn merge_documents(base: &mut Value, overlay: &Value) {
-  merge(
-    base,
-    overlay,
-    "",
-    &Origin::File(PathBuf::new()),
-    &mut Provenance::default(),
-  );
-}
-
-/// Deep-merge `overlay` into `base`, recording provenance for every
-/// leaf the overlay wins.
-fn merge(base: &mut Value, overlay: &Value, prefix: &str, origin: &Origin, provenance: &mut Provenance) {
-  match (base, overlay) {
-    (Value::Object(base_map), Value::Object(overlay_map)) => {
-      for (key, value) in overlay_map {
-        let path = if prefix.is_empty() {
-          key.clone()
-        } else {
-          format!("{prefix}.{key}")
-        };
-        let appends = value.is_array() && APPEND_KEYS.contains(&key.as_str());
-        match base_map.get_mut(key) {
-          Some(existing) if appends => {
-            let added = append_unique(existing, value);
-            if added {
-              provenance.contributed(&path, origin);
-            }
-            provenance.win(&path, origin);
-          },
-          Some(existing) => merge(existing, value, &path, origin, provenance),
-          None => {
-            if appends {
-              provenance.contributed(&path, origin);
-            }
-            base_map.insert(key.clone(), value.clone());
-            record_leaves(value, &path, origin, provenance);
-          },
-        }
-      }
-    },
-    (base, _) => {
-      *base = overlay.clone();
-      provenance.win(prefix, origin);
-    },
-  }
-}
-
-/// Concatenate `overlay` onto `existing`, dropping entries already
-/// present so a repeated layer (or a diamond `extends`) cannot
-/// duplicate a Chrome flag or an extension path.
-/// Returns whether this overlay actually added anything, so a layer that
-/// only repeats entries an earlier one already supplied is not reported
-/// as a contributor.
-fn append_unique(existing: &mut Value, overlay: &Value) -> bool {
-  let (Some(target), Some(items)) = (existing.as_array_mut(), overlay.as_array()) else {
-    *existing = overlay.clone();
-    return true;
-  };
-  let mut added = false;
-  for item in items {
-    if !target.contains(item) {
-      target.push(item.clone());
-      added = true;
-    }
-  }
-  added
-}
-
-/// Record provenance for every leaf under a freshly inserted subtree.
-fn record_leaves(value: &Value, prefix: &str, origin: &Origin, provenance: &mut Provenance) {
-  match value {
-    Value::Object(map) if !map.is_empty() => {
-      for (key, child) in map {
-        let path = if prefix.is_empty() {
-          key.clone()
-        } else {
-          format!("{prefix}.{key}")
-        };
-        record_leaves(child, &path, origin, provenance);
-      }
-    },
-    _ => {
-      // The FIRST layer to supply an additive array is a contributor too.
-      // Recording only the later layers that appended to it left a
-      // two-layer `chromeArgs` looking like it came from one file.
-      let leaf = prefix.rsplit('.').next().unwrap_or(prefix);
-      if value.is_array() && APPEND_KEYS.contains(&leaf) {
-        provenance.contributed(prefix, origin);
-      }
-      provenance.win(prefix, origin);
-    },
-  }
-}
-
-/// Apply `FERRIDRIVER_<SECTION>__<KEY>` overrides.
-///
-/// `__` separates nesting levels and a single `_` inside a segment is
-/// a camelCase boundary, so
-/// `FERRIDRIVER_MCP__BROWSER__INSTANCE_ARGS_COMMAND` sets
-/// `mcp.browser.instanceArgsCommand`. Values parse as JSON when they
-/// can (`true`, `7`, `["--flag"]`) and stay strings otherwise.
-///
-/// A name with no `__` is NOT a config key: the legacy single-segment
-/// variables (`FERRIDRIVER_WORKERS`, `FERRIDRIVER_BACKEND`, ...) keep
-/// their existing meaning in the test runner, and `FERRIDRIVER_CONFIG`
-/// / `FERRIDRIVER_NO_INHERIT` / `FERRIDRIVER_DEBUG` are loader
-/// controls. The two top-level path keys are the documented exception.
-fn apply_env(
-  env: &BTreeMap<String, String>,
-  document: &mut Value,
-  provenance: &mut Provenance,
-  warnings: &mut Vec<ConfigWarning>,
-) {
-  const TOP_LEVEL: &[(&str, &str)] = &[
-    ("FERRIDRIVER_SCRIPT_ROOT", "scriptRoot"),
-    ("FERRIDRIVER_ARTIFACTS_ROOT", "artifactsRoot"),
-  ];
-
-  for (name, raw) in env {
-    let Some(rest) = name.strip_prefix("FERRIDRIVER_") else {
-      continue;
-    };
-    let dotted = if rest.contains("__") {
-      rest.split("__").map(camel_case_segment).collect::<Vec<_>>().join(".")
-    } else if let Some((_, key)) = TOP_LEVEL.iter().find(|(var, _)| var == name) {
-      (*key).to_string()
-    } else {
-      continue;
-    };
-
-    if dotted.split('.').any(str::is_empty) {
-      warnings.push(ConfigWarning {
-        source: format!("${name}"),
-        message: "empty key segment (check for a stray `__`)".to_string(),
-      });
-      continue;
-    }
-
-    let value = parse_env_value(raw);
-    let overlay = nest(&dotted, value);
-    merge(document, &overlay, "", &Origin::Env(name.clone()), provenance);
-  }
-}
-
-/// `INSTANCE_ARGS_COMMAND` -> `instanceArgsCommand`.
-fn camel_case_segment(segment: &str) -> String {
-  let mut out = String::with_capacity(segment.len());
-  for (idx, word) in segment.split('_').filter(|w| !w.is_empty()).enumerate() {
-    let lower = word.to_ascii_lowercase();
-    if idx == 0 {
-      out.push_str(&lower);
-      continue;
-    }
-    let mut chars = lower.chars();
-    if let Some(first) = chars.next() {
-      out.extend(first.to_uppercase());
-      out.push_str(chars.as_str());
-    }
-  }
-  out
-}
-
-fn parse_env_value(raw: &str) -> Value {
-  serde_json::from_str::<Value>(raw).unwrap_or_else(|_| Value::String(raw.to_string()))
-}
-
-/// Build `{a: {b: value}}` from `"a.b"`.
-fn nest(dotted: &str, value: Value) -> Value {
-  let mut segments: Vec<&str> = dotted.split('.').collect();
-  let mut current = value;
-  while let Some(key) = segments.pop() {
-    let mut map = Map::new();
-    map.insert(key.to_string(), current);
-    current = Value::Object(map);
-  }
-  current
-}
-
-/// Deserialize the merged document, collecting keys no field claims.
-///
-/// # Errors
-///
-/// Returns an error when the document does not match the schema (a
-/// wrong type, or an invalid enum variant such as an unknown backend).
 /// Sections an extension may not contribute defaults for, and why.
 ///
 /// Every one of them decides how the contributing package itself was
@@ -1503,6 +835,7 @@ fn check_contributed_defaults(package: &str, value: &Value) -> anyhow::Result<()
   Ok(())
 }
 
+/// Deserialize the merged document, collecting keys no field claims.
 fn deserialize_document(document: &Value, warnings: &mut Vec<ConfigWarning>) -> anyhow::Result<FerridriverConfig> {
   let mut ignored = Vec::new();
   let config: FerridriverConfig = serde_ignored::deserialize(document, |path| ignored.push(path.to_string()))
@@ -1531,103 +864,4 @@ fn suggestion_for(key: &str) -> String {
     return String::new();
   }
   format!(" (did you mean `{camel}`?)")
-}
-
-#[cfg(test)]
-mod tests {
-  use super::*;
-
-  #[test]
-  fn camel_case_segment_joins_words() {
-    assert_eq!(camel_case_segment("BROWSER"), "browser");
-    assert_eq!(camel_case_segment("INSTANCE_ARGS_COMMAND"), "instanceArgsCommand");
-    assert_eq!(camel_case_segment("MCP"), "mcp");
-  }
-
-  #[test]
-  fn nest_builds_nested_objects() {
-    let v = nest("a.b.c", Value::Bool(true));
-    assert_eq!(v["a"]["b"]["c"], Value::Bool(true));
-  }
-
-  #[test]
-  fn parse_env_value_prefers_json() {
-    assert_eq!(parse_env_value("true"), Value::Bool(true));
-    assert_eq!(parse_env_value("7"), Value::from(7));
-    assert_eq!(parse_env_value(r#"["--a"]"#), Value::from(vec!["--a"]));
-    assert_eq!(parse_env_value("cdp-raw"), Value::String("cdp-raw".into()));
-  }
-
-  #[test]
-  fn normalize_path_removes_dot_segments() {
-    assert_eq!(normalize_path(Path::new("/a/./b/../c")), PathBuf::from("/a/c"));
-  }
-
-  #[test]
-  fn normalize_path_cannot_climb_past_the_root() {
-    // A source map's `../`-heavy entry joined onto a shallow cwd
-    // produces more `..` than there are components. The OS reads `/..`
-    // as `/`; keeping the `..` made the result compare as a prefix of
-    // nothing, which is how a multi-project run came to report "no
-    // tests matched" for a testDir outside the working directory.
-    assert_eq!(
-      normalize_path(Path::new("/one/two/../../../../tmp/specs/a.ts")),
-      PathBuf::from("/tmp/specs/a.ts")
-    );
-    // A relative path still keeps the `..` it needs.
-    assert_eq!(normalize_path(Path::new("a/../../b")), PathBuf::from("../b"));
-  }
-
-  #[test]
-  fn anchored_leaves_absolute_tilde_and_templates_alone() {
-    let dir = Path::new("/base");
-    let expected = normalize_path(&dir.join("x.ts")).to_string_lossy().into_owned();
-    assert_eq!(anchored(dir, "./x.ts").as_deref(), Some(expected.as_str()));
-    assert_eq!(anchored(dir, "x.ts").as_deref(), Some(expected.as_str()));
-    assert!(anchored(dir, "/abs/x.ts").is_none());
-    assert!(anchored(dir, "~/x.ts").is_none());
-    assert!(anchored(dir, "/tmp/${INSTANCE}/profile").is_none());
-    assert!(anchored(dir, "profiles/${INSTANCE}").is_none());
-  }
-
-  #[test]
-  fn append_unique_concatenates_without_duplicates() {
-    let mut base = Value::from(vec!["--a", "--b"]);
-    append_unique(&mut base, &Value::from(vec!["--b", "--c"]));
-    assert_eq!(base, Value::from(vec!["--a", "--b", "--c"]));
-  }
-
-  #[test]
-  fn normalize_promotes_extensions_shorthand() {
-    let mut v = serde_json::json!({ "extensions": ["./a.ts"] });
-    normalize(&mut v);
-    assert_eq!(v, serde_json::json!({ "extensions": { "paths": ["./a.ts"] } }));
-  }
-
-  #[test]
-  fn suggestion_names_the_camel_case_spelling() {
-    assert!(suggestion_for("mcp.browser.chrome_args").contains("chromeArgs"));
-    assert_eq!(suggestion_for("mcp.browser.nonsense"), "");
-  }
-}
-
-#[cfg(test)]
-mod yaml_tests {
-  #[test]
-  fn yaml_keeps_on_and_yes_as_strings() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("ferridriver.yaml");
-    std::fs::write(
-      &path,
-      "test:\n  use:\n    trace: { mode: on, snapshots: false }\n    video: on\n    note: yes\n    headless: true\n",
-    )
-    .unwrap();
-    let value = super::parse_file(&path).unwrap();
-    let used = &value["test"]["use"];
-    assert_eq!(used["trace"]["mode"], "on");
-    assert_eq!(used["trace"]["snapshots"], false);
-    assert_eq!(used["video"], "on");
-    assert_eq!(used["note"], "yes");
-    assert_eq!(used["headless"], true);
-  }
 }
