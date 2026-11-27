@@ -8,7 +8,7 @@ extend-exclude = [
   "crates/ferridriver/src/injected/roleUtils.ts",
   "crates/ferridriver/src/injected/isomorphic/",
   # Diffs against upstream Appium; their hunk headers cut upstream code mid-word
-  "crates/ferridriver/src/install/*.patch",
+  "crates/ferridriver-install/src/*.patch",
 ]
 
 [default.extend-words]
