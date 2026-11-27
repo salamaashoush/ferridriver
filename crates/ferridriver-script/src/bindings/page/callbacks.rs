@@ -516,25 +516,6 @@ pub(crate) fn with_page_callbacks<R>(
   Ok(f(&mut reg))
 }
 
-/// Stash an exposed-binding JS callback keyed by binding name. Shared
-/// by `page.exposeFunction` and `context.exposeBinding` /
-/// `context.exposeFunction` — both inject `window[name]`, so a single
-/// name-keyed registry suffices. Exposed `pub(crate)` so the context
-/// binding (in a sibling module) can reuse the same userdata.
-pub(crate) fn insert_exposed_callback(
-  ctx: &rquickjs::Ctx<'_>,
-  name: String,
-  cb: SavedCallback,
-) -> rquickjs::Result<()> {
-  with_page_callbacks(ctx, |r| r.exposed.insert(name, cb))?;
-  Ok(())
-}
-
-/// Look up a previously stashed exposed-binding callback by name.
-pub(crate) fn get_exposed_callback(ctx: &rquickjs::Ctx<'_>, name: &str) -> rquickjs::Result<Option<SavedCallback>> {
-  with_page_callbacks(ctx, |r| r.exposed.get(name).cloned())
-}
-
 /// Playwright's `BindingSource` for an `exposeBinding` callback: the
 /// live `{ context, page, frame }` the call came from, each the object
 /// that already stands for it. A source with no page behind it (the

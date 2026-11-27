@@ -1,5 +1,10 @@
 //! `BrowserContextJs`: JS wrapper around `ferridriver::context::ContextRef`.
 
+mod events;
+mod helpers;
+
+pub(crate) use helpers::{clear_cookie_options, cookie_urls};
+
 use std::sync::Arc;
 
 use ferridriver::context::ContextRef;
@@ -8,11 +13,10 @@ use rquickjs::{Ctx, JsLifetime, Value, class::Class, class::Trace};
 use rustc_hash::FxHashMap;
 
 use crate::bindings::convert::FerriResultCtxExt;
+use crate::bindings::convert::throw_named;
 use crate::bindings::convert::{init_script_from_js, serde_from_js, serde_to_js};
-use crate::bindings::convert::{throw_named, type_error};
-use crate::bindings::page::{
-  PageCallbacks, RouteOwner, call_predicate_truthy, url_value_to_matcher, with_page_callbacks,
-};
+use crate::bindings::page::{RouteOwner, with_page_callbacks};
+use helpers::page_array;
 
 #[derive(JsLifetime, Trace)]
 #[rquickjs::class(rename = "BrowserContext")]
@@ -534,7 +538,6 @@ crate::bindings::macros::qjs_impl! {
     )]
     options: rquickjs::function::Opt<Value<'js>>,
   ) -> rquickjs::Result<rquickjs::promise::Promised<impl std::future::Future<Output = rquickjs::Result<()>> + 'js>> {
-    let times = crate::bindings::page::parse_route_times(&options)?;
     let Some(vm) = ferrijs::vm_handle(&ctx) else {
       return Err(throw_named(
         &ctx,
@@ -542,69 +545,21 @@ crate::bindings::macros::qjs_impl! {
         "context.route requires the script engine's VM handle",
       ));
     };
-    let id = with_page_callbacks(&ctx, PageCallbacks::next_route_id)?;
-    // Sync prologue: snapshot the registrar's grant (see
-    // `SavedCallback::save` — an async-fn body first-polls off-bracket).
-    let saved_handler = crate::bindings::page::SavedCallback::save(&ctx, handler);
-
-    let has_predicate = url.as_function().is_some();
-    let (matcher, saved_pred, registry_matcher) = if let Some(pred) = url.as_function() {
-      let saved_pred = crate::bindings::page::SavedCallback::save(&ctx, pred.clone());
-      let m = ferridriver::url_matcher::UrlMatcher::predicate(|_| true);
-      (m.clone(), Some(saved_pred), Some(m))
-    } else {
-      (url_value_to_matcher(&ctx, &url)?, None, None)
-    };
-
-    let rust_handler: ferridriver::route::RouteHandler = std::sync::Arc::new(move |route| {
-      let vm = vm.clone();
-      tokio::spawn(async move {
-        use rquickjs::class::Class;
-        let _: Result<rquickjs::Result<()>, crate::error::ScriptError> = crate::vm_with!(vm => |ctx| {
-          if has_predicate {
-            let saved_pred = with_page_callbacks(&ctx, |r| r.get_route_pred(id))?
-              .ok_or_else(|| throw_named(&ctx, "Error", "context.route: route predicate gone"))?;
-            let pred = saved_pred.restore(&ctx)?;
-            let url_ctor: rquickjs::function::Constructor<'_> = ctx.globals().get("URL")?;
-            let url_obj: rquickjs::Value<'_> = url_ctor.construct((route.request().url.clone(),))?;
-            let truthy = call_predicate_truthy(&pred, url_obj, &ctx)
-            .await?;
-            if !truthy {
-              route.reject_as_unmatched();
-              return Ok(());
-            }
-          }
-          let f = with_page_callbacks(&ctx, |r| r.get_route_handler(id))?
-            .ok_or_else(|| throw_named(&ctx, "Error", "context.route: route handler gone"))?;
-          let route_class = Class::instance(ctx.clone(), crate::bindings::network::RouteJs::new(route))?;
-          // `call_bracketed_async`: an async route handler's `fetch`
-          // runs in a continuation off the synchronous call (see
-          // `page.route`).
-          let _: rquickjs::Value<'_> = f.call_bracketed_async(&ctx, (route_class,)).await?;
-          Ok(())
-        })
-        .await;
-      });
-    });
-
-    // AFTER the core handler exists: its `Arc` identity is what
-    // `unroute(url, handler)` names, so the registry has to remember it
-    // alongside the JS function the caller passed.
-    let handler_id = ferridriver::route::route_handler_id(&rust_handler);
-    with_page_callbacks(&ctx, |r| {
-      r.insert_route(
-        id,
-        self.route_owner(),
-        saved_handler,
-        handler_id,
-        saved_pred,
-        registry_matcher,
-      );
-    })?;
-
+    let prepared = crate::bindings::page::routing::prepare_route(
+      &ctx,
+      vm,
+      self.route_owner(),
+      "context.route",
+      &url,
+      handler,
+      &options,
+    )?;
     let inner = Arc::clone(&self.inner);
     Ok(rquickjs::promise::Promised::from(call_site.scope(async move {
-      inner.route(matcher, rust_handler, times).await.into_js_with(&ctx)?;
+      inner
+        .route(prepared.matcher, prepared.handler, prepared.times)
+        .await
+        .into_js_with(&ctx)?;
       Ok(())
     })))
   }
@@ -638,13 +593,8 @@ crate::bindings::macros::qjs_impl! {
         "context.routeWebSocket requires the script engine's VM handle",
       ));
     };
-    let matcher = url_value_to_matcher(&ctx, &url)?;
-    let handler_id = with_page_callbacks(&ctx, PageCallbacks::next_route_id)?;
-    let owner = RouteOwner::Context(self.inner.name().to_string());
-    // Sync prologue: snapshot the registrar's grant (see `SavedCallback::save`).
-    let saved = crate::bindings::page::SavedCallback::save(&ctx, handler);
-    with_page_callbacks(&ctx, |r| r.insert_ws_callback(handler_id, owner.clone(), saved))?;
-    let rust_handler = crate::bindings::web_socket_route::build_ws_route_handler(vm, handler_id, owner);
+    let (matcher, rust_handler) =
+      crate::bindings::page::routing::prepare_ws_route(&ctx, vm, self.route_owner(), &url, handler)?;
     let inner = Arc::clone(&self.inner);
     Ok(rquickjs::promise::Promised::from(async move {
       inner.route_web_socket(matcher, rust_handler).await.into_js_with(&ctx)
@@ -693,42 +643,18 @@ crate::bindings::macros::qjs_impl! {
   ) -> rquickjs::Result<()> {
     call_site
       .scope(async move {
-        // Playwright's second argument: remove only the registration
-        // made with THIS handler, leaving another handler on the same
-        // pattern serving.
-        let handler_fn = handler.0.as_ref().and_then(|v| v.as_function().cloned());
-        let mut handler_id: Option<usize> = None;
-        if let Some(handler_fn) = handler_fn {
-          let target = handler_fn.into_value();
-          for (_, saved, core_id) in with_page_callbacks(&ctx, |r| r.routes_for_owner(&self.route_owner()))? {
-            if saved.restore(&ctx)?.into_value() == target {
-              handler_id = Some(core_id);
-              break;
-            }
-          }
-          if handler_id.is_none() {
-            return Ok(());
-          }
-        }
-        if let Some(pred) = url.as_function() {
-          let saved = with_page_callbacks(&ctx, |r| r.predicate_routes_for_owner(&self.route_owner()))?;
-          let mut victims: Vec<u64> = Vec::new();
-          for (id, sp) in saved {
-            let stored = sp.restore(&ctx)?;
-            if stored.as_value() == pred.as_value() {
-              victims.push(id);
-            }
-          }
-          for id in victims {
-            let m = with_page_callbacks(&ctx, |r| r.remove_route(id))?;
-            if let Some(m) = m {
+        match crate::bindings::page::routing::prepare_unroute(&ctx, &self.route_owner(), &url, &handler)? {
+          crate::bindings::page::routing::UnroutePlan::Noop => Ok(()),
+          crate::bindings::page::routing::UnroutePlan::Predicates { matchers, handler_id } => {
+            for m in matchers {
               self.inner.unroute(&m, handler_id).await.into_js_with(&ctx)?;
             }
-          }
-          return Ok(());
+            Ok(())
+          },
+          crate::bindings::page::routing::UnroutePlan::Single { matcher, handler_id } => {
+            self.inner.unroute(&matcher, handler_id).await.into_js_with(&ctx)
+          },
         }
-        let matcher = url_value_to_matcher(&ctx, &url)?;
-        self.inner.unroute(&matcher, handler_id).await.into_js_with(&ctx)
       })
       .await
   }
@@ -752,13 +678,7 @@ crate::bindings::macros::qjs_impl! {
   ) -> rquickjs::Result<()> {
     call_site
       .scope(async move {
-        let behavior = match options.0.and_then(rquickjs::Value::into_object) {
-          Some(obj) => match obj.get::<_, Option<String>>("behavior")? {
-            Some(b) => Some(crate::bindings::page::options::parse_unroute_behavior(&ctx, &b)?),
-            None => None,
-          },
-          None => None,
-        };
+        let behavior = crate::bindings::page::routing::parse_unroute_all_behavior(&ctx, options)?;
         self.inner.unroute_all(behavior).await.into_js_with(&ctx)?;
         with_page_callbacks(&ctx, |r| r.remove_routes_for_owner(&self.route_owner()))?;
         Ok(())
@@ -1065,43 +985,7 @@ crate::bindings::macros::qjs_impl! {
     event: Opt<String>,
     options: Opt<Value<'js>>,
   ) -> rquickjs::Result<Value<'js>> {
-    {
-      let context = this.0.borrow();
-      let name = context.inner.name().to_string();
-      let removed = with_context_callbacks(&ctx, |r| {
-        let ids: Vec<u64> = r
-          .listeners
-          .iter()
-          .filter(|(_, e)| e.context == name && event.0.as_ref().is_none_or(|ev| &e.event == ev))
-          .map(|(id, _)| *id)
-          .collect();
-        for id in &ids {
-          r.listeners.remove(id);
-        }
-        ids
-      })?;
-      for id in removed {
-        context.inner.off(ferridriver::events::ListenerId(id));
-      }
-    }
-    let Some(options) = options.0.filter(|v| !v.is_undefined() && !v.is_null()) else {
-      return Ok(this.0.into_value());
-    };
-    let wait = options
-      .as_object()
-      .and_then(|o| o.get::<_, Option<String>>("behavior").ok().flatten())
-      .is_some_and(|behavior| behavior == "wait");
-    let tx = ensure_context_event_pump(&ctx);
-    let promise = rquickjs::promise::Promise::wrap_future(&ctx, async move {
-      if wait {
-        let (done_tx, done_rx) = tokio::sync::oneshot::channel();
-        if tx.send(ContextEventMsg::Drain(done_tx)).await.is_ok() {
-          let _ = done_rx.await;
-        }
-      }
-      Ok::<(), rquickjs::Error>(())
-    })?;
-    Ok(promise.into_value())
+    Self::remove_all_listeners_impl(this, &ctx, event.0.as_deref(), options)
   }
 
   /// Node's `listeners(type)`, in the order they will fire.
@@ -1111,21 +995,7 @@ crate::bindings::macros::qjs_impl! {
   /// Throws an `Error` when the context's listener registry is unavailable.
   #[qjs(rename = "listeners")]
   pub fn listeners<'js>(&self, ctx: Ctx<'js>, event: String) -> rquickjs::Result<Vec<Value<'js>>> {
-    let name = self.inner.name().to_string();
-    let saved = with_context_callbacks(&ctx, |r| {
-      r.listeners
-        .iter()
-        .filter(|(_, e)| e.context == name && e.event == event)
-        .map(|(id, e)| (*id, e.listener.clone()))
-        .collect::<Vec<_>>()
-    })?;
-    let mut out = Vec::with_capacity(saved.len());
-    for id in self.inner.listener_ids_named(&event) {
-      if let Some((_, cb)) = saved.iter().find(|(saved_id, _)| *saved_id == id.0) {
-        out.push(cb.restore(&ctx)?.into_value());
-      }
-    }
-    Ok(out)
+    self.listeners_impl(&ctx, &event)
   }
 
   // ── Context-level events ───────────────────────────────────────────────
@@ -1140,438 +1010,7 @@ crate::bindings::macros::qjs_impl! {
     event: String,
     options: Opt<Value<'js>>,
   ) -> rquickjs::promise::Promised<impl std::future::Future<Output = rquickjs::Result<Value<'js>>> + 'js> {
-    use ferridriver::events::EmitterEvent;
-    // Listening from the call, before the promise is first awaited.
-    let armed = crate::bindings::convert::arm_now(&ctx, || {
-      let mut timeout_ms: Option<f64> = None;
-      let mut predicate: Option<rquickjs::Function<'js>> = None;
-      if let Some(value) = options.0 {
-        if let Some(n) = value.as_number() {
-          timeout_ms = Some(n);
-        } else if let Some(f) = value.as_function() {
-          predicate = Some(f.clone());
-        } else if let Some(bag) = value.as_object() {
-          let timeout: Value<'js> = bag.get("timeout")?;
-          timeout_ms = timeout.as_number();
-          let found: Value<'js> = bag.get("predicate")?;
-          predicate = found.as_function().cloned();
-        }
-      }
-      let timeout = timeout_ms.map_or_else(|| self.inner.default_timeout(), crate::bindings::convert::ms_f64_to_u64);
-      let armed = match predicate {
-        None => ContextWait::Next(Box::pin(self.inner.wait_for_event(&event, timeout))),
-        Some(predicate) => ContextWait::Matching(self.inner.events().subscribe(), predicate),
-      };
-      Ok((timeout, armed))
-    });
-    rquickjs::promise::Promised::from(async move {
-      let (timeout, armed) = armed.map_err(|deferred| deferred.raise(&ctx))?;
-      let (mut rx, predicate) = match armed {
-        ContextWait::Next(next) => {
-          let ev = next.await.into_js_with(&ctx)?;
-          return context_event_to_js(&ctx, ev);
-        },
-        ContextWait::Matching(rx, predicate) => (rx, predicate),
-      };
-      let deadline = (timeout != 0).then(|| tokio::time::Instant::now() + std::time::Duration::from_millis(timeout));
-      loop {
-        let next = match deadline {
-          Some(deadline) => tokio::time::timeout_at(deadline, rx.recv()).await.ok(),
-          None => Some(rx.recv().await),
-        };
-        let Some(next) = next else {
-          return Err(crate::bindings::convert::throw_named(
-            &ctx,
-            "TimeoutError",
-            format!("Timeout {timeout}ms exceeded while waiting for event \"{event}\""),
-          ));
-        };
-        let Some(ev) = next else {
-          return Err(crate::bindings::convert::throw_named(
-            &ctx,
-            "Error",
-            "context closed while waiting for event",
-          ));
-        };
-        if !ferridriver::events::ContextEvent::matches_name(&event, &ev) {
-          continue;
-        }
-        let arg = context_event_to_js(&ctx, ev.clone())?;
-        if crate::bindings::page::call_predicate_truthy(&predicate, arg, &ctx).await? {
-          return context_event_to_js(&ctx, ev);
-        }
-      }
-    })
+    self.wait_for_event_impl(ctx, event, options)
   }
 }
-}
-
-/// What a `context.waitForEvent` listens with, armed at the call.
-enum ContextWait<'js> {
-  Next(
-    std::pin::Pin<Box<dyn std::future::Future<Output = ferridriver::Result<ferridriver::events::ContextEvent>> + Send>>,
-  ),
-  Matching(
-    ferridriver::EventSubscription<ferridriver::events::ContextEvent>,
-    rquickjs::Function<'js>,
-  ),
-}
-
-/// Pages as the objects that already stand for them.
-fn page_array<'js>(ctx: &Ctx<'js>, pages: Vec<Arc<ferridriver::Page>>) -> rquickjs::Result<rquickjs::Array<'js>> {
-  let array = rquickjs::Array::new(ctx.clone())?;
-  for (index, page) in pages.into_iter().enumerate() {
-    array.set(index, crate::bindings::identity::page_object(ctx, page)?)?;
-  }
-  Ok(array)
-}
-
-/// The `urls?: string | string[]` of `cookies()`.
-pub(crate) fn cookie_urls<'js>(ctx: &Ctx<'js>, urls: Option<Value<'js>>) -> rquickjs::Result<Vec<String>> {
-  match urls {
-    None => Ok(Vec::new()),
-    Some(value) if value.is_undefined() || value.is_null() => Ok(Vec::new()),
-    Some(value) => match value.as_string() {
-      Some(one) => Ok(vec![one.to_string()?]),
-      None => serde_from_js(ctx, value),
-    },
-  }
-}
-
-/// The `options?: { name?, domain?, path? }` of `clearCookies()`, each a
-/// `string | RegExp`. `None` when the caller passed no filter at all.
-pub(crate) fn clear_cookie_options<'js>(
-  ctx: &Ctx<'js>,
-  options: Option<Value<'js>>,
-  method: &str,
-) -> rquickjs::Result<Option<ferridriver::backend::ClearCookieOptions>> {
-  let Some(value) = options.filter(|value| !value.is_undefined() && !value.is_null()) else {
-    return Ok(None);
-  };
-  let obj = value
-    .as_object()
-    .ok_or_else(|| type_error(ctx, format!("{method}: expected an options object")))?;
-  let field = |key: &str| -> rquickjs::Result<Option<ferridriver::options::StringOrRegex>> {
-    let value: Value<'_> = obj.get(key)?;
-    if value.is_undefined() || value.is_null() {
-      return Ok(None);
-    }
-    crate::bindings::page::options::string_or_regex_from_js(&value).map(Some)
-  };
-  Ok(Some(ferridriver::backend::ClearCookieOptions {
-    name: field("name")?,
-    domain: field("domain")?,
-    path: field("path")?,
-  }))
-}
-
-impl BrowserContextJs {
-  /// Stash `callback` in the shared exposed-callback registry and build
-  /// an [`ferridriver::ExposedBinding`] that dispatches back into the
-  /// script context via the session `AsyncContext`. When `with_source`
-  /// is true the `{ context, page, frame }` source object is prepended
-  /// to the spread args (`exposeBinding`); otherwise only the args are
-  /// spread (`exposeFunction`).
-  fn make_binding<'js>(
-    ctx: &Ctx<'js>,
-    name: &str,
-    callback: rquickjs::Function<'js>,
-    with_source: bool,
-  ) -> rquickjs::Result<ferridriver::ExposedBinding> {
-    let Some(vm) = ferrijs::vm_handle(ctx) else {
-      return Err(throw_named(
-        ctx,
-        "Error",
-        "BrowserContext.exposeBinding requires the script engine's VM handle",
-      ));
-    };
-    let saved = crate::bindings::page::SavedCallback::save(ctx, callback);
-    crate::bindings::page::insert_exposed_callback(ctx, name.to_string(), saved)?;
-
-    let name = name.to_string();
-    let binding: ferridriver::ExposedBinding = Arc::new(move |source, args| {
-      let vm = vm.clone();
-      let name = name.clone();
-      Box::pin(async move {
-        let out: Result<rquickjs::Result<Result<ferridriver::BindingReturn, String>>, crate::error::ScriptError> =
-          crate::vm_with!(vm => |ctx| {
-            let saved = crate::bindings::page::get_exposed_callback(&ctx, &name)?
-              .ok_or_else(|| {
-                throw_named(&ctx, "Error", "BrowserContext.exposeBinding: exposed callback gone")
-              })?;
-            let f = saved.restore(&ctx)?;
-            // Playwright spreads the page-side call args into the
-            // callback. For exposeBinding the BindingSource object is the
-            // first argument; for exposeFunction it is omitted.
-            let mut call_args = rquickjs::function::Args::new_unsized(ctx.clone());
-            if with_source {
-              call_args.push_arg(crate::bindings::page::binding_source_object(&ctx, &source)?)?;
-            }
-            for v in &args {
-              // `json_to_js` (NOT serde): a transitive dep force-enables
-              // `serde_json/arbitrary_precision`, under which the serde
-              // path turns numbers into wrapper objects.
-              call_args.push_arg(crate::bindings::convert::json_to_js(&ctx, v)?)?;
-            }
-            crate::bindings::page::settle_exposed_call(&ctx, &f, call_args).await
-          })
-          .await;
-        crate::bindings::page::exposed_outcome(out)
-      })
-    });
-    Ok(binding)
-  }
-
-  /// Build the `{ dispose() }` Disposable returned from
-  /// `exposeBinding` / `exposeFunction`. `dispose()` removes the
-  /// binding from the registry and from every page in the context
-  /// (`window[name]` is deleted on each page), and releases the
-  /// persisted `QuickJS` callback so it doesn't sit in the session VM's
-  /// name-keyed registry forever.
-  fn make_disposable<'js>(&self, ctx: &Ctx<'js>, name: String) -> rquickjs::Result<Value<'js>> {
-    let obj = rquickjs::Object::new(ctx.clone())?;
-    let inner = Arc::clone(&self.inner);
-    let dispose = rquickjs::Function::new(
-      ctx.clone(),
-      rquickjs::prelude::Async(move |ctx: Ctx<'_>| {
-        // Already on the interpreter (dispose is JS-invoked), so the
-        // userdata registry is directly reachable — drop the stashed
-        // callback synchronously, then have core remove `window[name]`
-        // from every page (the future must not borrow `ctx`).
-        crate::bindings::page::remove_exposed_callback(&ctx, &name);
-        let inner = Arc::clone(&inner);
-        let name = name.clone();
-        async move {
-          let _ = inner.remove_exposed_binding(&name).await;
-        }
-      }),
-    )?;
-    obj.set("dispose", dispose)?;
-    rquickjs::IntoJs::into_js(obj, ctx)
-  }
-}
-
-// ── Context event emitter ────────────────────────────────────────────
-
-/// One `context.on` / `context.once` registration.
-struct ContextListenerEntry {
-  event: String,
-  /// Core context name, so listeners registered through one wrapper are
-  /// removed through another (`page.context()` mints a fresh wrapper
-  /// per call).
-  context: String,
-  listener: crate::bindings::page::SavedCallback,
-}
-
-#[derive(Default)]
-struct ContextCallbacks {
-  listeners: FxHashMap<u64, ContextListenerEntry>,
-}
-
-#[derive(JsLifetime)]
-struct ContextCallbacksUd(std::cell::RefCell<ContextCallbacks>);
-
-fn with_context_callbacks<R>(ctx: &Ctx<'_>, f: impl FnOnce(&mut ContextCallbacks) -> R) -> rquickjs::Result<R> {
-  if ctx.userdata::<ContextCallbacksUd>().is_none() {
-    let _ = ctx.store_userdata(ContextCallbacksUd(std::cell::RefCell::new(ContextCallbacks::default())));
-  }
-  let ud = ctx
-    .userdata::<ContextCallbacksUd>()
-    .ok_or_else(|| throw_named(ctx, "Error", "context callbacks registry missing"))?;
-  let mut reg = ud.0.borrow_mut();
-  Ok(f(&mut reg))
-}
-
-/// Message the context-event pump consumes. Same shape and the same
-/// rules as the page pump: a core callback fires on a backend thread and
-/// may only `send`; the VM is touched exclusively by the pump future,
-/// which the session's event loop polls on the interpreter thread.
-enum ContextEventMsg {
-  Event {
-    id: u64,
-    remove_after: bool,
-    event: Box<ferridriver::events::ContextEvent>,
-  },
-  Drain(tokio::sync::oneshot::Sender<()>),
-}
-
-#[derive(JsLifetime)]
-struct ContextEventPumpUd(tokio::sync::mpsc::Sender<ContextEventMsg>);
-
-/// Capacity of the context-event pump channel — the page pump's
-/// rationale and bound, applied to the lower-rate context stream.
-const CONTEXT_EVENT_PUMP_CAPACITY: usize = 1024;
-
-fn ensure_context_event_pump(ctx: &Ctx<'_>) -> tokio::sync::mpsc::Sender<ContextEventMsg> {
-  if let Some(ud) = ctx.userdata::<ContextEventPumpUd>() {
-    return ud.0.clone();
-  }
-  let (tx, mut rx) = tokio::sync::mpsc::channel::<ContextEventMsg>(CONTEXT_EVENT_PUMP_CAPACITY);
-  let pump_ctx = ctx.clone();
-  ctx.spawn(async move {
-    while let Some(msg) = rx.recv().await {
-      let ContextEventMsg::Event {
-        id,
-        remove_after,
-        event,
-      } = msg
-      else {
-        if let ContextEventMsg::Drain(done) = msg {
-          let _ = done.send(());
-        }
-        continue;
-      };
-      let Ok(Some(f)) = with_context_callbacks(&pump_ctx, |r| {
-        let entry = r.listeners.get(&id).map(|e| e.listener.clone());
-        if remove_after {
-          r.listeners.remove(&id);
-        }
-        entry
-      }) else {
-        continue;
-      };
-      let Ok(arg) = context_event_to_js(&pump_ctx, *event) else {
-        continue;
-      };
-      let _: rquickjs::Result<Value<'_>> = f.call_bracketed(&pump_ctx, (arg,));
-    }
-  });
-  let _ = ctx.store_userdata(ContextEventPumpUd(tx.clone()));
-  tx
-}
-
-/// Lift a context event into the live class instance Playwright hands a
-/// listener — the same mapping `waitForEvent` performs.
-fn context_event_to_js<'js>(ctx: &Ctx<'js>, event: ferridriver::events::ContextEvent) -> rquickjs::Result<Value<'js>> {
-  use ferridriver::events::ContextEvent;
-  use rquickjs::IntoJs;
-  use rquickjs::class::Class;
-  match event {
-    ContextEvent::Dialog(d) | ContextEvent::DialogClosed(d) => {
-      crate::bindings::identity::dialog_object(ctx, d)?.into_js(ctx)
-    },
-    ContextEvent::WebError(err) => {
-      Class::instance(ctx.clone(), crate::bindings::web_error::WebErrorJs::new(err))?.into_js(ctx)
-    },
-    ContextEvent::Download(d) => {
-      Class::instance(ctx.clone(), crate::bindings::download::DownloadJs::new(d))?.into_js(ctx)
-    },
-    ContextEvent::FrameAttached { page, frame_id }
-    | ContextEvent::FrameDetached { page, frame_id }
-    | ContextEvent::FrameNavigated { page, frame_id } => {
-      crate::bindings::identity::frame_object(ctx, page.frame_for_id(&frame_id))?.into_js(ctx)
-    },
-    ContextEvent::Page(page) | ContextEvent::PageClose(page) | ContextEvent::PageLoad(page) => {
-      crate::bindings::identity::page_object(ctx, page)?.into_js(ctx)
-    },
-    ContextEvent::Console(message) => Class::instance(
-      ctx.clone(),
-      crate::bindings::console_message::ConsoleMessageJs::new(message),
-    )?
-    .into_js(ctx),
-    ContextEvent::Request { page, request }
-    | ContextEvent::RequestFinished { page, request }
-    | ContextEvent::RequestFailed { page, request } => Class::instance(
-      ctx.clone(),
-      crate::bindings::network::RequestJs::new_with_page(request, page),
-    )?
-    .into_js(ctx),
-    ContextEvent::Response { page, response } => Class::instance(
-      ctx.clone(),
-      crate::bindings::network::ResponseJs::new_with_page(response, page),
-    )?
-    .into_js(ctx),
-    ContextEvent::Close(context) => {
-      Class::instance(ctx.clone(), BrowserContextJs::new(Arc::new(context)))?.into_js(ctx)
-    },
-  }
-}
-
-impl BrowserContextJs {
-  /// Shared core for the context emitter: persist the JS listener, then
-  /// register a core callback that only forwards `(id, event)` to this
-  /// context's pump. The backend thread never touches the VM.
-  fn register_listener<'js>(
-    &self,
-    ctx: &Ctx<'js>,
-    event: &str,
-    listener: rquickjs::Function<'js>,
-    once: bool,
-    front: bool,
-  ) -> rquickjs::Result<()> {
-    let saved = crate::bindings::page::SavedCallback::save(ctx, listener);
-    let tx = ensure_context_event_pump(ctx);
-    let id_slot = Arc::new(std::sync::atomic::AtomicU64::new(0));
-    let id_slot_cb = Arc::clone(&id_slot);
-    let callback: ferridriver::events::ContextEventCallback = Arc::new(move |ev: ferridriver::events::ContextEvent| {
-      let id = id_slot_cb.load(std::sync::atomic::Ordering::Relaxed);
-      let msg = ContextEventMsg::Event {
-        id,
-        remove_after: once,
-        event: Box::new(ev),
-      };
-      if let Err(tokio::sync::mpsc::error::TrySendError::Full(_)) = tx.try_send(msg) {
-        tracing::warn!(
-          listener_id = id,
-          capacity = CONTEXT_EVENT_PUMP_CAPACITY,
-          "context event pump full (VM idle between scripts?); dropping event"
-        );
-      }
-    });
-    let id = match (once, front) {
-      (false, false) => self.inner.on(event, callback),
-      (true, false) => self.inner.once(event, callback),
-      (false, true) => self.inner.prepend_listener(event, callback),
-      (true, true) => self.inner.prepend_once_listener(event, callback),
-    };
-    id_slot.store(id.0, std::sync::atomic::Ordering::Relaxed);
-    with_context_callbacks(ctx, |r| {
-      r.listeners.insert(
-        id.0,
-        ContextListenerEntry {
-          event: event.to_string(),
-          context: self.inner.name().to_string(),
-          listener: saved,
-        },
-      );
-    })?;
-    Ok(())
-  }
-
-  fn off_impl<'js>(&self, ctx: &Ctx<'js>, event: &str, listener: Option<&Value<'js>>) -> rquickjs::Result<()> {
-    let name = self.inner.name().to_string();
-    let Some(listener_fn) = listener.and_then(|v| v.as_function().cloned()) else {
-      let ids = with_context_callbacks(ctx, |r| {
-        let ids: Vec<u64> = r
-          .listeners
-          .iter()
-          .filter(|(_, e)| e.context == name && e.event == event)
-          .map(|(id, _)| *id)
-          .collect();
-        for id in &ids {
-          r.listeners.remove(id);
-        }
-        ids
-      })?;
-      for id in ids {
-        self.inner.off(ferridriver::events::ListenerId(id));
-      }
-      return Ok(());
-    };
-    let target: Value<'js> = listener_fn.into_value();
-    let saved = with_context_callbacks(ctx, |r| {
-      r.listeners
-        .iter()
-        .filter(|(_, e)| e.context == name && e.event == event)
-        .map(|(id, e)| (*id, e.listener.clone()))
-        .collect::<Vec<_>>()
-    })?;
-    for (id, cb) in saved {
-      if cb.restore(ctx)?.into_value() == target {
-        self.inner.off(ferridriver::events::ListenerId(id));
-        with_context_callbacks(ctx, |r| r.listeners.remove(&id))?;
-      }
-    }
-    Ok(())
-  }
 }

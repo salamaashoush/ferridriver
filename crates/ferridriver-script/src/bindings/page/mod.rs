@@ -7,10 +7,13 @@
 pub(crate) mod callbacks;
 mod events;
 pub(crate) mod options;
+mod profiler;
+pub(crate) mod routing;
 
 pub(crate) use callbacks::*;
 pub(crate) use events::*;
 pub(crate) use options::*;
+pub use profiler::TouchscreenJs;
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -1240,46 +1243,7 @@ crate::bindings::macros::qjs_impl! {
     options: Opt<rquickjs::Value<'js>>,
   ) -> rquickjs::Result<rquickjs::Value<'js>> {
     call_site
-      .scope(async move {
-        let options = match options.into_inner() {
-          Some(value) if !value.is_undefined() && !value.is_null() => serde_from_js(&ctx, value)?,
-          _ => serde_json::json!({}),
-        };
-        let context = self
-          .inner
-          .context()
-          .ok_or_else(|| ferridriver::FerriError::unsupported("JavaScript coverage requires a browser context"))
-          .into_js_with(&ctx)?;
-        let mut coverage = self.coverage_session.lock().await;
-        if coverage.is_some() {
-          return Err(throw_named(
-            &ctx,
-            "Error",
-            "page.startJSCoverage: JavaScript coverage is already started",
-          ));
-        }
-        let session = context.new_cdp_session(&self.inner).await.into_js_with(&ctx)?;
-        session
-          .send("Profiler.enable", serde_json::json!({}))
-          .await
-          .into_js_with(&ctx)?;
-        let result = session
-          .send(
-            "Profiler.startPreciseCoverage",
-            serde_json::json!({
-              "callCount": options.get("callCount").and_then(serde_json::Value::as_bool).unwrap_or(false),
-              "detailed": options.get("detailed").and_then(serde_json::Value::as_bool).unwrap_or(true),
-              "allowTriggeredUpdates": options
-                .get("allowTriggeredUpdates")
-                .and_then(serde_json::Value::as_bool)
-                .unwrap_or(false),
-            }),
-          )
-          .await
-          .into_js_with(&ctx)?;
-        *coverage = Some(session);
-        crate::bindings::convert::json_to_js(&ctx, &result)
-      })
+      .scope(async move { self.start_js_coverage_impl(&ctx, options).await })
       .await
   }
 
@@ -1296,21 +1260,7 @@ crate::bindings::macros::qjs_impl! {
     ctx: rquickjs::Ctx<'js>,
   ) -> rquickjs::Result<rquickjs::Value<'js>> {
     call_site
-      .scope(async move {
-        let coverage = self.coverage_session.lock().await;
-        let Some(session) = coverage.as_ref() else {
-          return Err(throw_named(
-            &ctx,
-            "Error",
-            "page.takeJSCoverage: JavaScript coverage has not been started",
-          ));
-        };
-        let result = session
-          .send("Profiler.takePreciseCoverage", serde_json::json!({}))
-          .await
-          .into_js_with(&ctx)?;
-        crate::bindings::convert::json_to_js(&ctx, &result)
-      })
+      .scope(async move { self.take_js_coverage_impl(&ctx).await })
       .await
   }
 
@@ -1327,25 +1277,7 @@ crate::bindings::macros::qjs_impl! {
     ctx: rquickjs::Ctx<'js>,
   ) -> rquickjs::Result<rquickjs::Value<'js>> {
     call_site
-      .scope(async move {
-        let mut coverage = self.coverage_session.lock().await;
-        let Some(session) = coverage.take() else {
-          return Err(throw_named(
-            &ctx,
-            "Error",
-            "page.stopJSCoverage: JavaScript coverage has not been started",
-          ));
-        };
-        let result = session
-          .send("Profiler.stopPreciseCoverage", serde_json::json!({}))
-          .await
-          .into_js_with(&ctx)?;
-        session
-          .send("Profiler.disable", serde_json::json!({}))
-          .await
-          .into_js_with(&ctx)?;
-        crate::bindings::convert::json_to_js(&ctx, &result)
-      })
+      .scope(async move { self.stop_js_coverage_impl(&ctx).await })
       .await
   }
 
@@ -1362,32 +1294,7 @@ crate::bindings::macros::qjs_impl! {
     ctx: rquickjs::Ctx<'js>,
   ) -> rquickjs::Result<rquickjs::Value<'js>> {
     call_site
-      .scope(async move {
-        let context = self
-          .inner
-          .context()
-          .ok_or_else(|| ferridriver::FerriError::unsupported("CPU profiling requires a browser context"))
-          .into_js_with(&ctx)?;
-        let mut profiler = self.cpu_profile_session.lock().await;
-        if profiler.is_some() {
-          return Err(throw_named(
-            &ctx,
-            "Error",
-            "page.startCPUProfile: CPU profiling is already started",
-          ));
-        }
-        let session = context.new_cdp_session(&self.inner).await.into_js_with(&ctx)?;
-        session
-          .send("Profiler.enable", serde_json::json!({}))
-          .await
-          .into_js_with(&ctx)?;
-        let result = session
-          .send("Profiler.start", serde_json::json!({}))
-          .await
-          .into_js_with(&ctx)?;
-        *profiler = Some(session);
-        crate::bindings::convert::json_to_js(&ctx, &result)
-      })
+      .scope(async move { self.start_cpu_profile_impl(&ctx).await })
       .await
   }
 
@@ -1404,25 +1311,7 @@ crate::bindings::macros::qjs_impl! {
     ctx: rquickjs::Ctx<'js>,
   ) -> rquickjs::Result<rquickjs::Value<'js>> {
     call_site
-      .scope(async move {
-        let mut profiler = self.cpu_profile_session.lock().await;
-        let Some(session) = profiler.take() else {
-          return Err(throw_named(
-            &ctx,
-            "Error",
-            "page.stopCPUProfile: CPU profiling has not been started",
-          ));
-        };
-        let result = session
-          .send("Profiler.stop", serde_json::json!({}))
-          .await
-          .into_js_with(&ctx)?;
-        session
-          .send("Profiler.disable", serde_json::json!({}))
-          .await
-          .into_js_with(&ctx)?;
-        crate::bindings::convert::json_to_js(&ctx, &result)
-      })
+      .scope(async move { self.stop_cpu_profile_impl(&ctx).await })
       .await
   }
 
@@ -1523,7 +1412,6 @@ crate::bindings::macros::qjs_impl! {
   ) -> rquickjs::Result<
     rquickjs::promise::Promised<impl std::future::Future<Output = rquickjs::Result<rquickjs::Value<'js>>> + 'js>,
   > {
-    let times = parse_route_times(&options)?;
     let vm = self.vm.clone().ok_or_else(|| {
       throw_named(
         &ctx,
@@ -1531,92 +1419,13 @@ crate::bindings::macros::qjs_impl! {
         "page.route requires the script engine's VM handle (install_page)",
       )
     })?;
-    let id = with_page_callbacks(&ctx, PageCallbacks::next_route_id)?;
-    // Snapshot the registrar's grant NOW (sync prologue, on the tool's
-    // stack) — see `SavedCallback::save`. The handler AND predicate keep
-    // this tool's `allow.net` when they later fire cross-task.
-    let saved_handler = SavedCallback::save(&ctx, handler);
-
-    // A JS predicate is `!Send` and core matches on the CDP recv task,
-    // so it can't ride `UrlMatcher::Predicate`. Register an always-true
-    // matcher with unique `Arc` identity (lets `unroute(fn)` drop
-    // exactly it via `Arc::ptr_eq`); evaluate the predicate in the
-    // dispatch bridge and continue the request unmodified on falsy.
-    let has_predicate = url.as_function().is_some();
-    let (matcher, saved_pred, registry_matcher) = if let Some(pred) = url.as_function() {
-      let saved_pred = SavedCallback::save(&ctx, pred.clone());
-      let m = ferridriver::url_matcher::UrlMatcher::predicate(|_| true);
-      (m.clone(), Some(saved_pred), Some(m))
-    } else {
-      (url_value_to_matcher(&ctx, &url)?, None, None)
-    };
-
-    // LIMITATION (persistent-session VMs): this closure captures a clone
-    // of the session's `AsyncContext`. Core route registrations live on
-    // the page (independent of the JS VM), so they outlive a poisoning
-    // rebuild / LRU eviction of the session VM. After such a discard the
-    // closure dispatches into the now-detached old context; the new VM's
-    // scripts cannot see or `unroute` it. It stays memory-safe (the Arc
-    // keeps the old context alive) and fail-open (the route's `Drop`
-    // continues the request if dispatch can't reach JS), and it clears
-    // when the page closes. Fully reconciling it needs a cross-backend
-    // "unroute all" on VM discard — tracked, not yet implemented.
-    let rust_handler: ferridriver::route::RouteHandler = std::sync::Arc::new(move |route| {
-      let vm = vm.clone();
-      // Cross-task dispatch: submit a job to the session's VM event
-      // loop (rule 2 of the re-entry discipline on `PageEventPumpUd`).
-      // The loop is always alive, so this works while the VM idles
-      // between executes AND while a script is parked on a host await.
-      // Errors are swallowed because the route's own `Drop` (fail-open
-      // continue) covers the case where dispatch can't reach JS.
-      tokio::spawn(async move {
-        use rquickjs::class::Class;
-        let _: Result<rquickjs::Result<()>, crate::error::ScriptError> = crate::vm_with!(vm => |ctx| {
-          if has_predicate {
-            let saved_pred = with_page_callbacks(&ctx, |r| r.get_route_pred(id))?
-              .ok_or_else(|| throw_named(&ctx, "Error", "page.route: route predicate gone"))?;
-            let pred = saved_pred.restore(&ctx)?;
-            let url_ctor: rquickjs::function::Constructor<'_> = ctx.globals().get("URL")?;
-            let url_obj: rquickjs::Value<'_> = url_ctor.construct((route.request().url.clone(),))?;
-            let truthy = call_predicate_truthy(&pred, url_obj, &ctx)
-            .await?;
-            if !truthy {
-              route.reject_as_unmatched();
-              return Ok(());
-            }
-          }
-          let f = with_page_callbacks(&ctx, |r| r.get_route_handler(id))?
-            .ok_or_else(|| throw_named(&ctx, "Error", "page.route: route handler gone"))?;
-          let route_class = Class::instance(ctx.clone(), crate::bindings::network::RouteJs::new(route))?;
-          // `call_bracketed_async`, not `call_bracketed`: a route handler
-          // is typically `async`, so its `fetch`/`request` runs in a
-          // continuation off the synchronous call — the grant must cover
-          // every poll of the returned promise, not only the call.
-          let _: rquickjs::Value<'_> = f.call_bracketed_async(&ctx, (route_class,)).await?;
-          Ok(())
-        })
-        .await;
-      });
-    });
-
-    // AFTER the core handler exists: its `Arc` identity is what
-    // `unroute(url, handler)` names, so the registry has to remember it
-    // alongside the JS function the caller passed.
-    let handler_id = ferridriver::route::route_handler_id(&rust_handler);
-    with_page_callbacks(&ctx, |r| {
-      r.insert_route(
-        id,
-        self.route_owner(),
-        saved_handler,
-        handler_id,
-        saved_pred,
-        registry_matcher,
-      );
-    })?;
-
+    let prepared = routing::prepare_route(&ctx, vm, self.route_owner(), "page.route", &url, handler, &options)?;
     let inner = Arc::clone(&self.inner);
     Ok(rquickjs::promise::Promised::from(async move {
-      let disposable = inner.route(matcher, rust_handler, times).await.into_js_with(&ctx)?;
+      let disposable = inner
+        .route(prepared.matcher, prepared.handler, prepared.times)
+        .await
+        .into_js_with(&ctx)?;
       let instance =
         rquickjs::class::Class::instance(ctx.clone(), crate::bindings::disposable::DisposableJs::new(disposable))?;
       rquickjs::IntoJs::into_js(instance, &ctx)
@@ -1648,14 +1457,7 @@ crate::bindings::macros::qjs_impl! {
         "page.routeWebSocket requires the script engine's VM handle (install_page)",
       )
     })?;
-    let matcher = url_value_to_matcher(&ctx, &url)?;
-    let handler_id = with_page_callbacks(&ctx, PageCallbacks::next_route_id)?;
-    let owner = RouteOwner::Page(self.inner.backend_page_id());
-    // Sync prologue: snapshot the registrar's grant (see `SavedCallback::save`).
-    let saved = SavedCallback::save(&ctx, handler);
-    with_page_callbacks(&ctx, |r| r.insert_ws_callback(handler_id, owner.clone(), saved))?;
-
-    let rust_handler = crate::bindings::web_socket_route::build_ws_route_handler(vm, handler_id, owner);
+    let (matcher, rust_handler) = routing::prepare_ws_route(&ctx, vm, self.route_owner(), &url, handler)?;
     let inner = Arc::clone(&self.inner);
     Ok(rquickjs::promise::Promised::from(async move {
       inner.route_web_socket(matcher, rust_handler).await.into_js_with(&ctx)
@@ -1710,50 +1512,18 @@ crate::bindings::macros::qjs_impl! {
   ) -> rquickjs::Result<()> {
     call_site
       .scope(async move {
-        // Playwright's second argument: remove only the registration
-        // made with THIS handler, leaving another handler on the same
-        // pattern serving. Without it, every route for the pattern goes.
-        let handler_fn = handler.0.as_ref().and_then(|v| v.as_function().cloned());
-        let mut handler_id: Option<usize> = None;
-        if let Some(handler_fn) = handler_fn {
-          let target = handler_fn.into_value();
-          for (_, saved, core_id) in with_page_callbacks(&ctx, |r| r.routes_for_owner(&self.route_owner()))? {
-            if saved.restore(&ctx)?.into_value() == target {
-              handler_id = Some(core_id);
-              break;
-            }
-          }
-          if handler_id.is_none() {
-            // Nothing was registered with that function: Playwright
-            // treats this as a no-op rather than an error.
-            return Ok(());
-          }
-        }
-        if let Some(pred) = url.as_function() {
-          // Find every id (registered through THIS page, from any of its
-          // wrappers) whose stored predicate is identical (===) to the
-          // passed function, then drop its core registration + registry
-          // entry. Restoring each saved predicate yields a handle to the
-          // same underlying object, so `Value` `PartialEq` (tag + pointer)
-          // is still strict `===` identity.
-          let saved = with_page_callbacks(&ctx, |r| r.predicate_routes_for_owner(&self.route_owner()))?;
-          let mut victims: Vec<u64> = Vec::new();
-          for (id, sp) in saved {
-            let stored = sp.restore(&ctx)?;
-            if stored.as_value() == pred.as_value() {
-              victims.push(id);
-            }
-          }
-          for id in victims {
-            let m = with_page_callbacks(&ctx, |r| r.remove_route(id))?;
-            if let Some(m) = m {
+        match routing::prepare_unroute(&ctx, &self.route_owner(), &url, &handler)? {
+          routing::UnroutePlan::Noop => Ok(()),
+          routing::UnroutePlan::Predicates { matchers, handler_id } => {
+            for m in matchers {
               self.inner.unroute(&m, handler_id).await.into_js_with(&ctx)?;
             }
-          }
-          return Ok(());
+            Ok(())
+          },
+          routing::UnroutePlan::Single { matcher, handler_id } => {
+            self.inner.unroute(&matcher, handler_id).await.into_js_with(&ctx)
+          },
         }
-        let matcher = url_value_to_matcher(&ctx, &url)?;
-        self.inner.unroute(&matcher, handler_id).await.into_js_with(&ctx)
       })
       .await
   }
@@ -1775,13 +1545,7 @@ crate::bindings::macros::qjs_impl! {
   ) -> rquickjs::Result<()> {
     call_site
       .scope(async move {
-        let behavior = match options.0.and_then(rquickjs::Value::into_object) {
-          Some(obj) => match obj.get::<_, Option<String>>("behavior")? {
-            Some(b) => Some(parse_unroute_behavior(&ctx, &b)?),
-            None => None,
-          },
-          None => None,
-        };
+        let behavior = routing::parse_unroute_all_behavior(&ctx, options)?;
         self.inner.unroute_all(behavior).await.into_js_with(&ctx)?;
         with_page_callbacks(&ctx, |r| r.remove_routes_for_owner(&self.route_owner()))?;
         Ok(())
@@ -1793,13 +1557,6 @@ crate::bindings::macros::qjs_impl! {
   /// Registers `handler` to run whenever `locator` becomes visible during an
   /// actionability wait (dismissing overlays/modals). Mirrors Playwright
   /// `client/page.ts:397`.
-  ///
-  /// The JS handler runs cross-task via the session VM's job queue (same
-  /// bridge as `page.route`): the triggering action is parked on a host
-  /// await, so the interpreter is free to run the queued handler job; the
-  /// core checkpoint awaits a oneshot the dispatch task fulfils once the
-  /// handler (and any returned promise) settles, so the original action
-  /// only resumes afterwards.
   ///
   /// # Errors
   ///
@@ -1813,76 +1570,7 @@ crate::bindings::macros::qjs_impl! {
     handler: rquickjs::Function<'js>,
     options: Opt<rquickjs::Value<'js>>,
   ) -> rquickjs::Result<()> {
-    let mut times: Option<u32> = None;
-    let mut no_wait_after = false;
-    if let Some(bag) = options.0.as_ref().and_then(rquickjs::Value::as_object) {
-      if let Ok(Some(t)) = bag.get::<_, Option<f64>>("times") {
-        times = Some(crate::bindings::convert::f64_to_u32(t));
-      }
-      if let Ok(Some(n)) = bag.get::<_, Option<bool>>("noWaitAfter") {
-        no_wait_after = n;
-      }
-    }
-    let vm = self.vm.clone().ok_or_else(|| {
-      throw_named(
-        &ctx,
-        "Error",
-        "page.addLocatorHandler requires the script engine's VM handle (install_page)",
-      )
-    })?;
-    let id = with_page_callbacks(&ctx, PageCallbacks::next_route_id)?;
-    let saved = SavedCallback::save(&ctx, handler);
-    with_page_callbacks(&ctx, |r| r.insert_locator_handler(id, saved))?;
-
-    let core_locator = locator.borrow().inner_ref().clone();
-    let rust_handler: ferridriver::locator_handler::LocatorHandlerFn = std::sync::Arc::new(move |loc| {
-      let vm = vm.clone();
-      Box::pin(async move {
-        let (tx, rx) = tokio::sync::oneshot::channel::<ferridriver::error::Result<()>>();
-        tokio::spawn(async move {
-          use rquickjs::class::Class;
-          let result: Result<rquickjs::Result<()>, crate::error::ScriptError> = crate::vm_with!(vm => |ctx| {
-            let f = with_page_callbacks(&ctx, |r| r.get_locator_handler(id))?.ok_or_else(|| {
-              throw_named(&ctx, "Error", "page.addLocatorHandler: locator handler gone")
-            })?;
-            let loc_class = Class::instance(ctx.clone(), LocatorJs::new(loc))?;
-            let _: rquickjs::Value<'_> = f.call_bracketed_async(&ctx, (loc_class,)).await?;
-            Ok(())
-          })
-          .await;
-          let mapped = match result {
-            Ok(Ok(())) => Ok(()),
-            Ok(Err(e)) => Err(ferridriver::error::FerriError::evaluation(format!(
-              "locator handler failed: {e}"
-            ))),
-            Err(e) => Err(ferridriver::error::FerriError::evaluation(format!(
-              "locator handler dispatch failed: {}",
-              e.message
-            ))),
-          };
-          let _ = tx.send(mapped);
-        });
-        match rx.await {
-          Ok(r) => r,
-          Err(_) => Err(ferridriver::error::FerriError::evaluation(
-            "locator handler dispatch task dropped",
-          )),
-        }
-      })
-    });
-
-    self
-      .inner
-      .add_locator_handler(&core_locator, rust_handler, times, no_wait_after)
-      .into_js_with(&ctx)?;
-    self
-      .locator_handler_ids
-      .lock()
-      .unwrap_or_else(std::sync::PoisonError::into_inner)
-      .entry(core_locator.selector().to_string())
-      .or_default()
-      .push(id);
-    Ok(())
+    self.add_locator_handler_impl(&ctx, &locator, handler, &options)
   }
 
   /// `page.removeLocatorHandler(locator)`. Drops every handler registered for
@@ -1898,20 +1586,7 @@ crate::bindings::macros::qjs_impl! {
     ctx: rquickjs::Ctx<'js>,
     locator: rquickjs::Class<'js, LocatorJs>,
   ) -> rquickjs::Result<()> {
-    let core_locator = locator.borrow().inner_ref().clone();
-    self.inner.remove_locator_handler(&core_locator);
-    let ids = self
-      .locator_handler_ids
-      .lock()
-      .unwrap_or_else(std::sync::PoisonError::into_inner)
-      .remove(core_locator.selector())
-      .unwrap_or_default();
-    with_page_callbacks(&ctx, |r| {
-      for id in ids {
-        r.remove_locator_handler(id);
-      }
-    })?;
-    Ok(())
+    self.remove_locator_handler_impl(&ctx, &locator)
   }
 
   /// `page.pickLocator(): Promise<Locator>`. Highlights elements under the
@@ -2402,64 +2077,14 @@ crate::bindings::macros::qjs_impl! {
         "page.exposeFunction requires the script engine's VM handle (install_page)",
       )
     })?;
-    // Snapshot the registrar's net grant NOW, synchronously — a `#[qjs]`
-    // async-fn body first-polls off the tool's `bracket_net` swap, so an
-    // in-body `active_net` reads the resting `None`. Sync prologue of a
-    // `fn -> Promised` runs on the caller's stack, where the grant is live.
-    // Stash the JS callback in the native page-callbacks registry keyed
-    // by binding name — cross-task dispatch (the Rust `ExposedFn` runs
-    // outside the QuickJS context) restores it by name inside a VM-loop
-    // job.
-    let saved = SavedCallback::save(&ctx, callback);
-    let page_key = self.inner.backend_page_id();
-    with_page_callbacks(&ctx, |r| {
-      r.exposed.insert(name.clone(), saved);
-      // Tracked so page close releases the Persistent — exposeFunction
-      // has no dispose in Playwright, and the session VM outlives the
-      // page.
-      r.track_exposed_owner(page_key, name.clone());
-    })?;
-
-    let cb: ferridriver::events::ExposedFn = std::sync::Arc::new({
-      let name = name.clone();
-      move |args: Vec<serde_json::Value>| {
-        let vm = vm.clone();
-        let name = name.clone();
-        // Playwright delivers the callback's return value (awaiting a
-        // returned Promise) to the page-side caller. Run the JS
-        // callback as a VM-loop job, await it if it returns a
-        // thenable, convert to JSON and hand it back so the backend
-        // resolves the page binding with the REAL value — not `null`
-        // (the previous fire-and-forget behaviour was a Playwright
-        // incompatibility).
-        Box::pin(async move {
-          let out: Result<rquickjs::Result<Result<ferridriver::BindingReturn, String>>, crate::error::ScriptError> =
-            crate::vm_with!(vm => |ctx| {
-              let saved = with_page_callbacks(&ctx, |r| r.exposed.get(&name).cloned())?
-                .ok_or_else(|| {
-                  throw_named(&ctx, "Error", "page.exposeFunction: exposed callback gone")
-                })?;
-              let f = saved.restore(&ctx)?;
-              // Playwright spreads the page-side call arguments into the
-              // callback: `window.fn(a, b)` -> `callback(a, b)` (see
-              // playwright-core client/page.ts `(...args) => callback(...args)`).
-              // Build a spread arg list, not a single array.
-              let mut call_args = rquickjs::function::Args::new_unsized(ctx.clone());
-              for v in args {
-                // `json_to_js` (NOT `serde_to_js`): a transitive dep
-                // force-enables `serde_json/arbitrary_precision`, under
-                // which ferrijs-serde turns every number into a
-                // `{$serde_json::private::Number}` object. The AP-safe
-                // walker keeps numbers as JS numbers.
-                call_args.push_arg(crate::bindings::convert::json_to_js(&ctx, &v)?)?;
-              }
-              settle_exposed_call(&ctx, &f, call_args).await
-            })
-            .await;
-          exposed_outcome(out)
-        })
-      }
-    });
+    let cb = routing::prepare_exposed_fn(
+      &ctx,
+      vm,
+      self.inner.backend_page_id(),
+      "page.exposeFunction",
+      &name,
+      callback,
+    )?;
     let inner = Arc::clone(&self.inner);
     Ok(rquickjs::promise::Promised::from(async move {
       inner.expose_function(&name, cb).await.into_js_with(&ctx)
@@ -2490,40 +2115,15 @@ crate::bindings::macros::qjs_impl! {
         "page.exposeBinding requires the script engine's VM handle (install_page)",
       )
     })?;
-    let saved = SavedCallback::save(&ctx, callback);
-    let page_key = self.inner.backend_page_id();
-    with_page_callbacks(&ctx, |r| {
-      r.exposed.insert(name.clone(), saved);
-      r.track_exposed_owner(page_key, name.clone());
-    })?;
-
-    let cb: ferridriver::events::ExposedBinding = std::sync::Arc::new({
-      let name = name.clone();
-      move |source, args: Vec<serde_json::Value>| {
-        let vm = vm.clone();
-        let name = name.clone();
-        Box::pin(async move {
-          let out: Result<rquickjs::Result<Result<ferridriver::BindingReturn, String>>, crate::error::ScriptError> =
-            crate::vm_with!(vm => |ctx| {
-              let saved = with_page_callbacks(&ctx, |r| r.exposed.get(&name).cloned())?.ok_or_else(|| {
-                throw_named(&ctx, "Error", "page.exposeBinding: exposed callback gone")
-              })?;
-              let f = saved.restore(&ctx)?;
-              let mut call_args = rquickjs::function::Args::new_unsized(ctx.clone());
-              // Playwright passes the source object first, then spreads
-              // the page-side call arguments: `callback(source, ...args)`.
-              let source: ferridriver::events::BindingSource = source;
-              call_args.push_arg(binding_source_object(&ctx, &source)?)?;
-              for v in args {
-                call_args.push_arg(crate::bindings::convert::json_to_js(&ctx, &v)?)?;
-              }
-              settle_exposed_call(&ctx, &f, call_args).await
-            })
-            .await;
-          exposed_outcome(out)
-        })
-      }
-    });
+    let cb = routing::prepare_exposed_binding(
+      &ctx,
+      vm,
+      Some(self.inner.backend_page_id()),
+      "page.exposeBinding",
+      &name,
+      callback,
+      true,
+    )?;
     let inner = Arc::clone(&self.inner);
     Ok(rquickjs::promise::Promised::from(async move {
       inner.expose_binding(&name, cb).await.into_js_with(&ctx)
@@ -2534,15 +2134,6 @@ crate::bindings::macros::qjs_impl! {
   /// maxWidth, maxHeight, callback)`. Callback receives `{ frame:
   /// Uint8Array, timestamp: number }` per frame. Backed by CDP
   /// `Page.startScreencast`; no Playwright client equivalent.
-  ///
-  /// Frames are delivered by a `ctx.spawn` pump on the interpreter
-  /// thread — NOT `tokio::spawn` + `async_with`: a long-lived loop
-  /// resolving a plain JS callback from a second thread is exactly the
-  /// pump shape that crashed the event listeners (see the module-level
-  /// re-entry discipline notes on `PageEventPumpUd`). The pump only
-  /// runs while the VM is driven; frames arriving while the VM idles
-  /// are coalesced to the newest one (a screencast consumer wants the
-  /// latest frame, and the core channel is unbounded).
   ///
   /// # Errors
   ///
@@ -2557,44 +2148,7 @@ crate::bindings::macros::qjs_impl! {
     max_height: u32,
     callback: rquickjs::Function<'js>,
   ) -> rquickjs::Result<rquickjs::promise::Promised<impl std::future::Future<Output = rquickjs::Result<()>> + 'js>> {
-    // Sync prologue: snapshot the registrar's grant so the frame
-    // callback keeps this tool's `allow.net` (see `SavedCallback::save`).
-    let saved = SavedCallback::save(&ctx, callback);
-    with_page_callbacks(&ctx, |r| r.screencast = Some(saved))?;
-    let inner = Arc::clone(&self.inner);
-    Ok(rquickjs::promise::Promised::from(async move {
-      // Frames flow until `stopScreencast` clears the callback or the
-      // channel closes.
-      let mut rx = inner
-        .start_screencast(quality, max_width, max_height)
-        .await
-        .into_js_with(&ctx)?;
-      let pump_ctx = ctx.clone();
-      ctx.spawn(async move {
-        while let Some((mut bytes, mut ts)) = rx.recv().await {
-          while let Ok((b, t)) = rx.try_recv() {
-            bytes = b;
-            ts = t;
-          }
-          let Ok(Some(saved)) = with_page_callbacks(&pump_ctx, |r| r.screencast.clone()) else {
-            break; // stopScreencast cleared the callback
-          };
-          let Ok(f) = saved.restore(&pump_ctx) else { break };
-          let deliver = || -> rquickjs::Result<()> {
-            let payload = rquickjs::Object::new(pump_ctx.clone())?;
-            let buf = rquickjs::TypedArray::<u8>::new(pump_ctx.clone(), bytes)?;
-            payload.set("frame", buf)?;
-            payload.set("timestamp", ts)?;
-            let _: rquickjs::Value<'_> = f.call((payload,))?;
-            Ok(())
-          };
-          // A throwing callback is swallowed so one bad frame handler
-          // can't kill the pump (same policy as the event pump).
-          let _ = deliver();
-        }
-      });
-      Ok(())
-    }))
+    self.start_screencast_impl(ctx, quality, max_width, max_height, callback)
   }
 
   /// ferridriver-specific (NOT Playwright): stop the screencast
@@ -2621,27 +2175,6 @@ crate::bindings::macros::qjs_impl! {
       .await
   }
 }
-}
-
-/// Playwright `Touchscreen`. Construct via `page.touchscreen`.
-#[derive(rquickjs::JsLifetime, rquickjs::class::Trace)]
-#[rquickjs::class(rename = "Touchscreen")]
-pub struct TouchscreenJs {
-  #[qjs(skip_trace)]
-  page: std::sync::Arc<ferridriver::Page>,
-}
-
-#[rquickjs::methods]
-impl TouchscreenJs {
-  /// Playwright: `touchscreen.tap(x, y)`.
-  ///
-  /// # Errors
-  ///
-  /// Rejects with the core failure (`TimeoutError`, `TargetClosedError` or `FerriError`) when the tap fails.
-  #[qjs(rename = "tap")]
-  pub async fn tap(&self, ctx: rquickjs::Ctx<'_>, x: f64, y: f64) -> rquickjs::Result<()> {
-    self.page.touchscreen().tap(x, y).await.into_js_with(&ctx)
-  }
 }
 
 type Pending<T> = std::pin::Pin<Box<dyn std::future::Future<Output = ferridriver::Result<T>> + Send>>;
