@@ -14,6 +14,8 @@ const thrown = (body: () => unknown): string => {
 };
 
 describe('toMatchSnapshot', () => {
+  describe.configure({ lock: 'heavy-screenshot' });
+
   test('a string matches synchronously and a different one throws', async ({}, testInfo) => {
     expect('stable text').toMatchSnapshot('value.txt');
     expect(existsSync(testInfo.snapshotPath('value.txt'))).toBe(true);

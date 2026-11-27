@@ -580,7 +580,9 @@ async fn discover_bidi_ws_url(
 
   let stderr = stderr.ok_or_else(|| FerriError::backend("Firefox: no stderr handle"))?;
   let mut reader = tokio::io::BufReader::new(stderr);
-  let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(15);
+  // Match Playwright's 30s launch timeout so cold Firefox startup on loaded
+  // Windows CI runners does not time out prematurely at 15s.
+  let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
 
   let mut line = String::new();
   // What Firefox printed before the URL, so a startup failure carries
@@ -602,7 +604,7 @@ async fn discover_bidi_ws_url(
     if tokio::time::Instant::now() >= deadline {
       return Err(FerriError::timeout(
         "waiting for Firefox BiDi WebSocket URL in stderr",
-        15_000,
+        30_000,
       ));
     }
 
