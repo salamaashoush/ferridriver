@@ -12,6 +12,12 @@ impl CdpBrowser {
   /// Returns an error if Chrome rejects `Storage.getCookies`, the target has closed, or the command outlives
   /// its time budget.
   pub async fn context_cookies(&self, browser_context_id: Option<&str>) -> Result<Vec<CookieData>> {
+    if let Some(fut) = browser_context_id
+      .zip(self.connections.as_ref())
+      .and_then(|(context, connections)| connections.context_cookies(context))
+    {
+      return fut.await;
+    }
     let result = self
       .transport
       .send(None, &ferridriver_cdp_proto::storage::GetCookies { browser_context_id })
@@ -26,6 +32,12 @@ impl CdpBrowser {
   /// Returns an error if Chrome rejects `Storage.setCookies`, the target has closed, or the command outlives
   /// its time budget.
   pub async fn add_context_cookies(&self, browser_context_id: Option<&str>, cookies: &[CookieData]) -> Result<()> {
+    if let Some(fut) = browser_context_id
+      .zip(self.connections.as_ref())
+      .and_then(|(context, connections)| connections.add_context_cookies(context, cookies))
+    {
+      return fut.await;
+    }
     let cdp_cookies: Vec<serde_json::Value> = cookies.iter().map(cookie_to_cdp).collect();
     self
       .transport
@@ -47,6 +59,12 @@ impl CdpBrowser {
   /// Returns an error if Chrome rejects `Storage.clearCookies`, the target has closed, or the command
   /// outlives its time budget.
   pub async fn clear_context_cookies(&self, browser_context_id: Option<&str>) -> Result<()> {
+    if let Some(fut) = browser_context_id
+      .zip(self.connections.as_ref())
+      .and_then(|(context, connections)| connections.clear_context_cookies(context))
+    {
+      return fut.await;
+    }
     self
       .transport
       .send(
@@ -116,6 +134,7 @@ impl Clone for CdpBrowser {
       spares: Arc::clone(&self.spares),
       version: Arc::clone(&self.version),
       isolated_contexts: self.isolated_contexts,
+      flavor: self.flavor,
       headful: self.headful,
       front_tab: Arc::clone(&self.front_tab),
       popup_taps: Arc::clone(&self.popup_taps),
@@ -323,6 +342,7 @@ pub(super) struct AttachCtx {
   attached: AttachedTargets,
   spares: Arc<recycle::Spares>,
   headful: Arc<std::sync::atomic::AtomicBool>,
+  flavor: CdpFlavor,
   in_flight: crate::backend::PopupsInFlight,
 }
 
@@ -381,6 +401,7 @@ impl CdpBrowser {
     viewport: Option<&crate::options::ViewportConfig>,
     unpause: bool,
     init_script: Option<&str>,
+    flavor: CdpFlavor,
   ) -> Result<Option<Vec<super::super::FrameInfo>>> {
     // Page bootstrap has no context options yet; a `screen` in the bag
     // is applied by `apply_context_options`, which re-sends this
@@ -467,15 +488,31 @@ impl CdpBrowser {
     // `DOM.enable` is omitted — `DOM.getDocument` enables it implicitly
     // when needed, and Playwright never sends it during page bootstrap.
     let default_media = default_emulated_media_raw();
-    let (r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11) = tokio::join!(
+    // Lightpanda has no renderer crash events (`Inspector.targetCrashed`),
+    // no screencast focus gating, and no CSS media-feature emulation, so
+    // skipping those three commands saves three wire messages on every page
+    // bootstrap.
+    let chromium_only = async {
+      if flavor.is_lightpanda() {
+        return Ok::<(), FerriError>(());
+      }
+      let (f1, f2, f3) = tokio::join!(
+        transport.send_command_raw(session_id, "Emulation.setFocusEmulationEnabled", ENABLED_TRUE_RAW),
+        transport.send_command_raw(session_id, "Inspector.enable", EMPTY_PARAMS_RAW),
+        transport.send_command_raw(session_id, "Emulation.setEmulatedMedia", default_media),
+      );
+      f1?;
+      f2?;
+      f3?;
+      Ok(())
+    };
+    let (r1, r2, r3, r4, r5, r6, r7, r8, r9) = tokio::join!(
       transport.send_command_raw(session_id, "Page.enable", EMPTY_PARAMS_RAW),
       transport.send_command_raw(session_id, "Runtime.enable", EMPTY_PARAMS_RAW),
       transport.send_command_raw(session_id, "Network.enable", EMPTY_PARAMS_RAW),
       transport.send_command_raw(session_id, "Page.setLifecycleEventsEnabled", ENABLED_TRUE_RAW),
       transport.send_command_raw(session_id, "Target.setAutoAttach", AUTOATTACH_PARAMS_RAW),
-      transport.send_command_raw(session_id, "Emulation.setFocusEmulationEnabled", ENABLED_TRUE_RAW),
-      transport.send_command_raw(session_id, "Inspector.enable", EMPTY_PARAMS_RAW),
-      transport.send_command_raw(session_id, "Emulation.setEmulatedMedia", default_media),
+      chromium_only,
       vp_fut,
       inject_fut,
       unpause_fut,
@@ -489,8 +526,6 @@ impl CdpBrowser {
     r7?;
     r8?;
     r9?;
-    r10?;
-    r11?;
     Ok(None)
   }
 
@@ -506,6 +541,15 @@ impl CdpBrowser {
     child: Option<super::super::process::ChildGroup>,
     user_data_dir: Option<tempfile::TempDir>,
   ) -> Result<Self> {
+    Self::init_with_flavor(transport, child, user_data_dir, CdpFlavor::Chromium).await
+  }
+
+  async fn init_with_flavor(
+    transport: Arc<CdpTransport>,
+    child: Option<super::super::process::ChildGroup>,
+    user_data_dir: Option<tempfile::TempDir>,
+    flavor: CdpFlavor,
+  ) -> Result<Self> {
     let downloads_dir = new_downloads_dir()?;
     let mut child = child;
     if let Some(ref mut group) = child {
@@ -520,6 +564,7 @@ impl CdpBrowser {
       &attached_targets,
       &spares,
       Arc::clone(&headful_flag),
+      flavor,
     );
 
     let auto_attach = ferridriver_cdp_proto::target::SetAutoAttach {
@@ -540,8 +585,9 @@ impl CdpBrowser {
     } else {
       Arc::from(version_resp.product.as_str())
     };
-    // Chrome reports "HeadlessChrome/<v>" only when it has no UI window.
-    let headful = !version.starts_with("HeadlessChrome");
+    // Chrome reports "HeadlessChrome/<v>" only when it has no UI window;
+    // Lightpanda is headless-only even though its `product` reports Chrome.
+    let headful = !flavor.is_lightpanda() && !version.starts_with("HeadlessChrome");
     headful_flag.store(headful, std::sync::atomic::Ordering::Release);
     let isolated_contexts = !version_resp.user_agent.contains("Android");
 
@@ -551,6 +597,7 @@ impl CdpBrowser {
       attached_targets,
       version,
       isolated_contexts,
+      flavor,
       headful,
       front_tab: Arc::default(),
       spares,
@@ -593,6 +640,7 @@ impl CdpBrowser {
     attached: &AttachedTargets,
     spares: &Arc<recycle::Spares>,
     headful: Arc<std::sync::atomic::AtomicBool>,
+    flavor: CdpFlavor,
   ) -> (
     crate::backend::PopupTaps,
     Arc<CreateLedger>,
@@ -619,6 +667,7 @@ impl CdpBrowser {
       attached: Arc::clone(attached),
       spares: Arc::clone(spares),
       headful: Arc::clone(&headful),
+      flavor,
       in_flight: popups.in_flight.clone(),
     };
     // Flush channel: `end_create` (called from new_page, no transport
@@ -633,7 +682,14 @@ impl CdpBrowser {
       while flush_rx.recv().await.is_some() {
         let is_headful = flush_headful.load(std::sync::atomic::Ordering::Acquire);
         for parked in flush_ledger.take_unowned_parked() {
-          Self::claim_parked_popup(&flush_transport, &flush_taps, &flush_downloads, parked, is_headful);
+          Self::claim_parked_popup(
+            &flush_transport,
+            &flush_taps,
+            &flush_downloads,
+            parked,
+            is_headful,
+            flavor,
+          );
         }
       }
     });
@@ -782,6 +838,7 @@ impl CdpBrowser {
       &ctx.downloads_dir,
       parked,
       ctx.headful.load(std::sync::atomic::Ordering::Acquire),
+      ctx.flavor,
     );
   }
 
@@ -794,6 +851,7 @@ impl CdpBrowser {
     downloads_dir: &Arc<DownloadsDir>,
     parked: ParkedTarget,
     headful: bool,
+    flavor: CdpFlavor,
   ) {
     let transport = Arc::clone(transport);
     let taps = Arc::clone(taps);
@@ -813,6 +871,7 @@ impl CdpBrowser {
         &target_id,
         browser_context_id.as_deref(),
         headful,
+        flavor,
       )
       .await;
       let deliver_failed = match claimed_page {
@@ -856,6 +915,7 @@ impl CdpBrowser {
     target_id: &str,
     browser_context_id: Option<&str>,
     headful: bool,
+    flavor: CdpFlavor,
   ) -> Result<CdpPage> {
     let inject_src = crate::selectors::lazy_inject_js();
     let injected_script = Arc::new(InjectedScriptManager::new());
@@ -883,6 +943,7 @@ impl CdpBrowser {
       last_metrics_params: Arc::new(std::sync::Mutex::new(None)),
       last_media_params: Arc::new(std::sync::Mutex::new(Some(default_emulated_media_params()))),
       headful,
+      flavor,
       window_id: Arc::new(tokio::sync::OnceCell::new()),
       context_screen: Arc::new(std::sync::Mutex::new(None)),
       seeded_frame_tree: Arc::new(std::sync::Mutex::new(None)),
@@ -920,6 +981,7 @@ impl CdpBrowser {
           None,
           false,
           Some(&inject_src),
+          flavor,
         ))
         .await?;
         if frames.is_some() {
@@ -1025,7 +1087,15 @@ impl CdpBrowser {
           .map_err(|e| FerriError::Backend(format!("Lock poisoned: {e}")))?
           .insert(target_id.clone(), sid.clone());
 
-        Box::pin(Self::enable_domains(&self.transport, sid.as_deref(), None, false, None)).await?;
+        Box::pin(Self::enable_domains(
+          &self.transport,
+          sid.as_deref(),
+          None,
+          false,
+          None,
+          self.flavor,
+        ))
+        .await?;
 
         sid
       };
@@ -1062,6 +1132,7 @@ impl CdpBrowser {
       last_metrics_params: Arc::new(std::sync::Mutex::new(None)),
       last_media_params: Arc::new(std::sync::Mutex::new(None)),
       headful: self.headful,
+      flavor: self.flavor,
       window_id: Arc::new(tokio::sync::OnceCell::new()),
       context_screen: Arc::new(std::sync::Mutex::new(None)),
       seeded_frame_tree: Arc::new(std::sync::Mutex::new(None)),
@@ -1285,6 +1356,7 @@ impl CdpBrowser {
         viewport,
         true,
         Some(inject_src.as_ref()),
+        self.flavor,
       )
       .boxed()
       .await?;
@@ -1365,6 +1437,7 @@ impl CdpBrowser {
       last_metrics_params: Arc::new(std::sync::Mutex::new(desired_metrics)),
       last_media_params: Arc::new(std::sync::Mutex::new(Some(applied_media))),
       headful: self.headful,
+      flavor: self.flavor,
       window_id: Arc::new(tokio::sync::OnceCell::new()),
       context_screen: Arc::new(std::sync::Mutex::new(None)),
       seeded_frame_tree: Arc::new(std::sync::Mutex::new(frame_tree_seed)),

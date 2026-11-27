@@ -296,6 +296,7 @@ mod tests {
       spares: Arc::default(),
       version: Arc::from("Chrome/fixture"),
       isolated_contexts: true,
+      flavor: super::super::CdpFlavor::Chromium,
       headful: false,
       front_tab: Arc::default(),
       popup_taps: Arc::default(),

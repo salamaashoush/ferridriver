@@ -408,7 +408,11 @@ impl CdpPage {
   /// non-matching assets (images/fonts/CSS/scripts). Falls back to `"*"`
   /// whenever any route is `Any`, `Regex`, or `Predicate`, or auth handling
   /// is enabled.
-  fn fetch_enable_params(routes: &[crate::route::RegisteredRoute], has_creds: bool) -> serde_json::Value {
+  fn fetch_enable_params(
+    routes: &[crate::route::RegisteredRoute],
+    has_creds: bool,
+    flavor: CdpFlavor,
+  ) -> serde_json::Value {
     let wildcard = || {
       serde_json::json!({
         "patterns": [{"urlPattern": "*", "requestStage": "Request"}],
@@ -424,9 +428,15 @@ impl CdpPage {
       let crate::url_matcher::UrlMatcher::Glob { pattern, .. } = &route.matcher else {
         return wildcard();
       };
-      let Some(cdp_pat) = glob_to_cdp_url_pattern(pattern) else {
+      let Some(mut cdp_pat) = glob_to_cdp_url_pattern(pattern) else {
         return wildcard();
       };
+      // Lightpanda matches `Fetch.enable` urlPatterns against URLs that still
+      // carry their `#fragment`, so a pattern not ending in `*` (e.g.
+      // `*/fx/landed`) would skip `http://.../fx/landed#part`.
+      if flavor.is_lightpanda() && !cdp_pat.ends_with('*') {
+        cdp_pat.push('*');
+      }
       if seen.insert(cdp_pat.clone()) {
         patterns.push(serde_json::json!({"urlPattern": cdp_pat, "requestStage": "Request"}));
       }
@@ -445,7 +455,7 @@ impl CdpPage {
     let has_creds = self.http_credentials.read().await.is_some() || self.proxy_credentials.read().await.is_some();
     let enable = {
       let routes = self.routes.read().await;
-      Self::fetch_enable_params(&routes, has_creds)
+      Self::fetch_enable_params(&routes, has_creds, self.flavor)
     };
     if self.fetch.enabled.load(std::sync::atomic::Ordering::SeqCst) {
       let unchanged = self
@@ -689,10 +699,12 @@ impl CdpPage {
     let request_id = params.get("requestId").and_then(|v| v.as_str()).unwrap_or("");
     let req_obj = params.get("request");
     // Borrow URL directly from the JSON event — zero allocation for matching.
-    let url = req_obj
+    // Strip any `#fragment` (Lightpanda includes fragments in `Fetch.requestPaused`).
+    let raw_url = req_obj
       .and_then(|r| r.get("url"))
       .and_then(|v| v.as_str())
       .unwrap_or("");
+    let url = raw_url.split('#').next().unwrap_or(raw_url);
 
     // Cheap pre-check under a read lock — the full request payload is
     // only parsed when at least one live route matches.

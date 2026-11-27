@@ -118,10 +118,18 @@ impl Page {
     result: Result<Option<crate::network::Response>>,
   ) -> Result<Option<crate::network::Response>> {
     let response = result?;
+    let needs_lightpanda_frame_sync = self.inner.is_lightpanda()
+      && self.with_frame_cache(|c| {
+        c.live_ids().any(|id| {
+          c.record(&id)
+            .is_some_and(|r| r.info.parent_frame_id.is_some() && r.info.name.is_empty())
+        })
+      });
     if matches!(
       self.inner.kind(),
       crate::backend::BackendKind::Bidi | crate::backend::BackendKind::WebKit | crate::backend::BackendKind::WebDriver
-    ) {
+    ) || needs_lightpanda_frame_sync
+    {
       // Single pass — extra sync rounds would push past the
       // `setTimeout(confirm, 80)` window dialog tests rely on between
       // goto-returning and the user subscribing to `waitForEvent`.

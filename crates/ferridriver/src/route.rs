@@ -228,9 +228,14 @@ impl InterceptedRequest {
     net_guard: Option<crate::http_client::NetGuard>,
   ) -> crate::error::Result<crate::http_client::HttpResponse> {
     let headers = options.headers.unwrap_or_else(|| {
+      // Drop the browser's `cookie` header when inheriting from the paused
+      // request so the context's `HttpClient` attaches the authoritative
+      // context cookies itself (Playwright's `_innerFetch` strips `cookie`
+      // unless the caller explicitly supplied `headers`).
       self
         .headers
         .iter()
+        .filter(|(name, _)| !name.eq_ignore_ascii_case("cookie"))
         .map(|(name, value)| (name.clone(), value.clone()))
         .collect()
     });

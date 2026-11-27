@@ -13,7 +13,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use rustc_hash::FxHashMap;
 
-use super::CdpBrowser;
+use super::{CdpBrowser, CdpFlavor, DownloadsDir};
+use crate::backend::CookieData;
 use crate::error::Result;
 
 /// The futures these methods return. [`CdpBrowser`]'s own methods await
@@ -31,14 +32,20 @@ pub(crate) struct Routed {
 
 pub(crate) struct ContextConnections {
   server: String,
+  version: Arc<str>,
+  downloads_dir: Arc<DownloadsDir>,
+  flavor: CdpFlavor,
   next: AtomicU64,
   contexts: std::sync::Mutex<FxHashMap<String, Routed>>,
 }
 
 impl ContextConnections {
-  pub(crate) fn new(server: String) -> Self {
+  pub(crate) fn new(server: String, version: Arc<str>, downloads_dir: Arc<DownloadsDir>, flavor: CdpFlavor) -> Self {
     Self {
       server,
+      version,
+      downloads_dir,
+      flavor,
       next: AtomicU64::new(0),
       contexts: std::sync::Mutex::default(),
     }
@@ -63,14 +70,14 @@ impl ContextConnections {
     taps: &'a crate::backend::PopupTaps,
   ) -> Erased<'a, String> {
     Box::pin(async move {
-      let browser = CdpBrowser::connect_opening(&self.server, &FxHashMap::default(), false).await?;
-      let raw = match browser.new_context(proxy).await {
-        Ok(raw) => raw,
-        Err(error) => {
-          let _ = browser.close().await;
-          return Err(error);
-        },
-      };
+      let (browser, raw) = CdpBrowser::connect_context_connection(
+        &self.server,
+        Arc::clone(&self.version),
+        Arc::clone(&self.downloads_dir),
+        self.flavor,
+        proxy,
+      )
+      .await?;
       let id = format!("{raw}@{}", self.next.fetch_add(1, Ordering::Relaxed) + 1);
       forward_popups(&browser, &raw, &id, Arc::clone(taps));
       self.contexts().insert(id.clone(), Routed { browser, raw });
@@ -92,6 +99,34 @@ impl ContextConnections {
     }))
   }
 
+  /// Read cookies from a routed context on its own connection.
+  pub(crate) fn context_cookies(&self, browser_context_id: &str) -> Option<Erased<'_, Vec<CookieData>>> {
+    let routed = self.route(browser_context_id)?;
+    Some(Box::pin(async move {
+      routed.browser.context_cookies(Some(&routed.raw)).await
+    }))
+  }
+
+  /// Add cookies to a routed context on its own connection.
+  pub(crate) fn add_context_cookies<'a>(
+    &'a self,
+    browser_context_id: &str,
+    cookies: &'a [CookieData],
+  ) -> Option<Erased<'a, ()>> {
+    let routed = self.route(browser_context_id)?;
+    Some(Box::pin(async move {
+      routed.browser.add_context_cookies(Some(&routed.raw), cookies).await
+    }))
+  }
+
+  /// Clear cookies in a routed context on its own connection.
+  pub(crate) fn clear_context_cookies(&self, browser_context_id: &str) -> Option<Erased<'_, ()>> {
+    let routed = self.route(browser_context_id)?;
+    Some(Box::pin(async move {
+      routed.browser.clear_context_cookies(Some(&routed.raw)).await
+    }))
+  }
+
   /// Dispose a context and close the connection it had. `false` for an
   /// id that is not one of these; the `Target.disposeBrowserContext`
   /// failure otherwise.
@@ -110,9 +145,12 @@ impl ContextConnections {
   pub(crate) fn popups_settled(&self) -> Erased<'_, ()> {
     Box::pin(async move {
       let browsers: Vec<_> = self.contexts().values().map(|routed| routed.browser.clone()).collect();
-      for browser in browsers {
-        browser.popups_settled().await?;
-      }
+      futures::future::try_join_all(
+        browsers
+          .into_iter()
+          .map(|browser| async move { browser.popups_settled().await }),
+      )
+      .await?;
       Ok(())
     })
   }
@@ -120,9 +158,10 @@ impl ContextConnections {
   pub(crate) fn close(&self) -> Erased<'_, ()> {
     Box::pin(async move {
       let routed: Vec<_> = self.contexts().drain().map(|(_, routed)| routed).collect();
-      for routed in routed {
+      futures::future::join_all(routed.into_iter().map(|routed| async move {
         let _ = routed.browser.close().await;
-      }
+      }))
+      .await;
       Ok(())
     })
   }

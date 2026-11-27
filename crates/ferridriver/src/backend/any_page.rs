@@ -320,6 +320,11 @@ impl AnyPage {
     }
   }
 
+  #[must_use]
+  pub(crate) fn is_lightpanda(&self) -> bool {
+    matches!(self, AnyPage::Cdp(p) if p.is_lightpanda())
+  }
+
   // ── Frames ──
 
   /// # Errors
@@ -1266,7 +1271,8 @@ impl AnyPage {
     match self {
       Self::Cdp(p) => {
         let (transport, target_id) = p.session_parts();
-        CdpSession::attach_to_target(transport, target_id).await
+        let event_override = p.is_lightpanda().then(|| p.primary_session_id()).flatten();
+        CdpSession::attach_to_target(transport, target_id, event_override).await
       },
       Self::WebKit(_) | Self::Bidi(_) | Self::WebDriver(_) => Err(crate::error::FerriError::unsupported(
         "CDP session is only available on Chromium (CDP backends)",

@@ -333,6 +333,41 @@ impl CdpPage {
     .abort_handle()
   }
 
+  /// Read a child frame's HTML `name` attribute from its owning `<iframe>`
+  /// element via `DOM.getFrameOwner` + `DOM.describeNode`.
+  pub(super) async fn resolve_frame_owner_name(
+    transport: &CdpTransport,
+    session: Option<&str>,
+    frame_id: &str,
+  ) -> Option<String> {
+    let owner = transport
+      .send(session, &ferridriver_cdp_proto::dom::GetFrameOwner { frame_id })
+      .await
+      .ok()?;
+    let described = transport
+      .send(
+        session,
+        &ferridriver_cdp_proto::dom::DescribeNode {
+          backend_node_id: Some(owner.backend_node_id),
+          ..Default::default()
+        },
+      )
+      .await
+      .ok()?;
+    described
+      .node
+      .attributes
+      .as_deref()
+      .and_then(|attributes| {
+        attributes
+          .chunks(2)
+          .find(|pair| pair.first().map(String::as_str) == Some("name"))
+          .and_then(|pair| pair.get(1).map(String::as_str))
+      })
+      .filter(|name| !name.is_empty())
+      .map(str::to_owned)
+  }
+
   /// `Page.frameNavigated`'s `frame.name` is optional, and a browser that
   /// leaves it out still names a child frame in the `name` attribute of
   /// the element that owns it, which is where this reads it from.
@@ -360,44 +395,11 @@ impl CdpPage {
         };
         let (transport, session_id, cache) = (Arc::clone(&transport), session_id.clone(), Arc::clone(&cache));
         tokio::spawn(async move {
-          let session = session_id.as_deref();
-          let Ok(owner) = transport
-            .send(
-              session,
-              &ferridriver_cdp_proto::dom::GetFrameOwner { frame_id: &frame_id },
-            )
-            .await
-          else {
-            return;
-          };
-          let Ok(described) = transport
-            .send(
-              session,
-              &ferridriver_cdp_proto::dom::DescribeNode {
-                backend_node_id: Some(owner.backend_node_id),
-                ..Default::default()
-              },
-            )
-            .await
-          else {
-            return;
-          };
-          let name = described
-            .node
-            .attributes
-            .as_deref()
-            .and_then(|attributes| {
-              attributes
-                .chunks(2)
-                .find(|pair| pair.first().map(String::as_str) == Some("name"))
-                .and_then(|pair| pair.get(1).map(String::as_str))
-            })
-            .filter(|name| !name.is_empty());
-          if let Some(name) = name {
+          if let Some(name) = Self::resolve_frame_owner_name(&transport, session_id.as_deref(), &frame_id).await {
             cache
               .lock()
               .unwrap_or_else(std::sync::PoisonError::into_inner)
-              .rename(&frame_id, name);
+              .rename(&frame_id, &name);
           }
         });
       }

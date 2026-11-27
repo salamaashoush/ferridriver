@@ -247,7 +247,8 @@ impl CdpPage {
   pub async fn request_gc(&self) -> Result<()> {
     self
       .send_typed(&ferridriver_cdp_proto::heap_profiler::CollectGarbage {})
-      .await?;
+      .await
+      .map_err(|e| map_cdp_unsupported(e, "requestGC needs Chromium"))?;
     Ok(())
   }
 

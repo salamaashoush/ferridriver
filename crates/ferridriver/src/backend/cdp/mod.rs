@@ -107,6 +107,25 @@ impl CdpWorker {
   }
 }
 
+/// Which CDP server implementation sits on the other side of the wire.
+///
+/// Most CDP logic is shared verbatim between Chromium and Lightpanda; this
+/// tag isolates the narrow places where Lightpanda's server differs (headless
+/// only with no OS window chrome, PNG-only screenshots, omitted `frame.name`
+/// on `Page.frameNavigated`, and unsupported Chrome-only domains).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum CdpFlavor {
+  #[default]
+  Chromium,
+  Lightpanda,
+}
+
+impl CdpFlavor {
+  pub(crate) const fn is_lightpanda(self) -> bool {
+    matches!(self, Self::Lightpanda)
+  }
+}
+
 // ---- CdpBrowser --------------------------------------------------------
 
 pub struct CdpBrowser {
@@ -126,6 +145,7 @@ pub struct CdpBrowser {
   /// Example: `"HeadlessChrome/120.0.6099.109"`.
   version: Arc<str>,
   pub(crate) isolated_contexts: bool,
+  flavor: CdpFlavor,
   /// Whether this browser draws real window chrome, so a viewport has
   /// to account for the title bar and borders when it sizes the window
   /// (Playwright's `browser.options.headful`).
@@ -203,6 +223,19 @@ use browser::{
   metrics_params_for, window_insets,
 };
 use network_tracker::{NetworkTracker, PendingWebMcpInvocation, cookie_from_cdp, cookie_to_cdp};
+
+/// Map a CDP protocol error indicating an unimplemented command (`wasn't found`)
+/// or an explicit `"not supported"` refusal to [`FerriError::Unsupported`],
+/// leaving transport, timeout, and other errors untouched.
+pub(super) fn map_cdp_unsupported(error: FerriError, reason: &str) -> FerriError {
+  if let FerriError::Protocol { ref message, .. } = error {
+    let lower = message.to_ascii_lowercase();
+    if lower.contains("wasn't found") || lower.contains("not supported") || lower.contains("not implemented") {
+      return FerriError::unsupported(reason);
+    }
+  }
+  error
+}
 
 // ---- CdpPage ------------------------------------------------------------
 
@@ -592,6 +625,7 @@ pub struct CdpPageInner {
   /// Whether the browser draws real window chrome (see
   /// [`CdpBrowser::headful`]).
   headful: bool,
+  flavor: CdpFlavor,
   /// The browser window this page's target lives in, resolved on first
   /// use by `Browser.getWindowForTarget`.
   ///
@@ -1067,6 +1101,18 @@ impl CdpPage {
         then(transport.send_command(session.as_deref(), method, &params).await?)
       }))
       .await
+  }
+
+  /// Whether this page is driven by Lightpanda's CDP server.
+  #[must_use]
+  pub(crate) fn is_lightpanda(&self) -> bool {
+    self.flavor.is_lightpanda()
+  }
+
+  /// Primary CDP session id attached to this page target, if flattened.
+  #[must_use]
+  pub(crate) fn primary_session_id(&self) -> Option<&str> {
+    self.session_id.as_deref()
   }
 
   /// Unpause a popup target parked by `Target.setAutoAttach`'s

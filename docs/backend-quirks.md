@@ -29,6 +29,23 @@ the layer you are about to change.
   a fresh iframe document resolves against a map that has not caught up,
   misroutes to the main frame, and strands the caller's promise. Resolution
   happens inline in the tracker loop; the user callback is spawned.
+- **Lightpanda quirks behind `CdpFlavor::Lightpanda`.** Lightpanda reports
+  `Chrome/<v>` (not `HeadlessChrome/<v>`) from `Browser.getVersion`, so
+  `headful` must be forced `false` and `Browser.getWindowForTarget` /
+  `setWindowBounds` skipped. It omits `frame.name` from `Page.frameNavigated`
+  and `Page.getFrameTree` (and leaves `iframe.contentWindow.name` undefined),
+  so child frame names are read from `DOM.getFrameOwner` + `DOM.describeNode`
+  and synced at `finish_navigation` when unnamed children are present. Its
+  `Fetch.requestPaused` keeps `#fragment` on request URLs (and matches
+  `Fetch.enable` `urlPattern` against URLs with fragments) and truncates the
+  last byte of the paused `Cookie` header; `page_interception.rs` strips
+  fragments and appends `*` to narrowed Lightpanda patterns, while
+  `InterceptedRequest::fetch` drops inherited `cookie` headers so
+  `HttpClient` attaches authoritative context cookies. Its
+  `Page.captureScreenshot` supports PNG only, so JPEG and WebP are transcoded
+  from PNG in Rust. Its `IDBObjectStore.add` rejects a second `undefined`
+  argument on stores with an inline `keyPath`, so `storageScript.ts` passes
+  the key argument only when defined.
 
 ## WebKit
 

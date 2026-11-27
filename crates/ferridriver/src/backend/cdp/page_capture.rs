@@ -2,6 +2,23 @@
 
 use super::*;
 
+fn transcode_png(png: &[u8], format: ImageFormat, quality: Option<u8>) -> Result<Vec<u8>> {
+  match format {
+    ImageFormat::Png => Ok(png.to_vec()),
+    ImageFormat::Jpeg => {
+      let image = image::load_from_memory_with_format(png, image::ImageFormat::Png)
+        .map_err(|e| FerriError::backend(format!("screenshot png decode: {e}")))?
+        .to_rgb8();
+      let mut out = Vec::new();
+      image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, quality.unwrap_or(80))
+        .encode_image(&image)
+        .map_err(|e| FerriError::backend(format!("screenshot jpeg encode: {e}")))?;
+      Ok(out)
+    },
+    ImageFormat::Webp => crate::backend::encode_webp_from_png(png, quality),
+  }
+}
+
 impl CdpPage {
   // ---- Screenshots ----
 
@@ -78,13 +95,18 @@ impl CdpPage {
       };
       clip_scale /= overridden.or(computed).filter(|dsf| *dsf > 0.0).unwrap_or(1.0);
     }
-    let format = match capture.format {
-      ImageFormat::Png => "png",
-      ImageFormat::Jpeg => "jpeg",
-      ImageFormat::Webp => "webp",
+    let transcode_from_png = self.flavor.is_lightpanda() && capture.format != ImageFormat::Png;
+    let wire_format = if transcode_from_png {
+      "png"
+    } else {
+      match capture.format {
+        ImageFormat::Png => "png",
+        ImageFormat::Jpeg => "jpeg",
+        ImageFormat::Webp => "webp",
+      }
     };
     let mut params = serde_json::json!({
-      "format": format,
+      "format": wire_format,
       "clip": {
         "x": document_rect.x,
         "y": document_rect.y,
@@ -94,7 +116,7 @@ impl CdpPage {
       },
       "captureBeyondViewport": !capture.fits_viewport,
     });
-    if let Some(quality) = capture.quality {
+    if !transcode_from_png && let Some(quality) = capture.quality {
       params["quality"] = serde_json::json!(quality);
     }
     // Capturing beyond the viewport resets touch emulation in Chromium
@@ -108,6 +130,11 @@ impl CdpPage {
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
     let bytes = screenshot::capture(&self.transport, self.session_id.as_deref(), params).await?;
+    let bytes = if transcode_from_png {
+      transcode_png(&bytes, capture.format, capture.quality)?
+    } else {
+      bytes
+    };
     if had_touch {
       self
         .send_typed(&ferridriver_cdp_proto::emulation::SetTouchEmulationEnabled {
@@ -161,7 +188,8 @@ impl CdpPage {
         max_height: Some(max_height),
         every_nth_frame: Some(1),
       })
-      .await?;
+      .await
+      .map_err(|e| map_cdp_unsupported(e, "screencast / video recording is not supported by this browser"))?;
 
     Ok((rx, shutdown_tx))
   }
