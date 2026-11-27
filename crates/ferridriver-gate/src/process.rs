@@ -176,18 +176,24 @@ pub(crate) async fn run(
   let started = Instant::now();
   let mut child = command.spawn().with_context(|| format!("start {}", job.name))?;
   let group = ProcessGroup(child.id().context("child has no PID")?);
-  let passed = tokio::select! {
-    result = child.wait() => result?.success(),
+  let (exited, passed) = tokio::select! {
+    result = child.wait() => (true, result?.success()),
     () = tokio::time::sleep(Duration::from_secs(job.timeout)) => {
       eprintln!("{} exceeded {}s", job.name, job.timeout);
       #[cfg(target_os = "macos")]
       sample_stacks(group.0, logs, &job.name).await;
-      false
+      (false, false)
     }
-    _ = cancellation.changed() => false,
+    _ = cancellation.changed() => (false, false),
   };
-  group.terminate(&mut child).await;
-  child.wait().await.ok();
+  if exited {
+    // Leader already exited; reap any lingering descendants immediately
+    // without spending a 2s SIGTERM wait on an exited child.
+    group.kill();
+  } else {
+    group.terminate(&mut child).await;
+    child.wait().await.ok();
+  }
   drop(group);
   Ok(Finished {
     name: job.name.clone(),

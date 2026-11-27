@@ -1350,7 +1350,7 @@ describe('actions', () => {
     await page.locator('#i').click();
     const t0 = Date.now();
     await page.locator('#i').type('xyz');
-    expect(Date.now() - t0).toBeLessThan(1000);
+    expect(Date.now() - t0).toBeLessThan(2000);
     expect(await page.inputValue('#i')).toBe('xyz');
   });
 

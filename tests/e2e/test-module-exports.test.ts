@@ -21,6 +21,9 @@ import ferridriverDefault, {
 } from '@ferridriver/test';
 import playwrightDefault, { test as playwrightTest, expect as playwrightExpect } from '@playwright/test';
 import { test as slashTest } from 'playwright/test';
+import { runOnceAcrossProjects } from './helpers/projects';
+
+test.beforeEach(runOnceAcrossProjects);
 
 describe('framework module exports', () => {
   test('the default export is the test function itself', async ({}) => {

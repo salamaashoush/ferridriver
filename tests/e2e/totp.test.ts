@@ -1,6 +1,9 @@
 // The RFC 6238 vectors through the script binding.
 
 import { test, expect, totp } from '@ferridriver/test';
+import { runOnceAcrossProjects } from './helpers/projects';
+
+test.beforeEach(runOnceAcrossProjects);
 
 const SECRET = 'GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ';
 

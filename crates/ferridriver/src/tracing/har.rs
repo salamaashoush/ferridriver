@@ -317,8 +317,15 @@ async fn build_response(
     });
   }
   // Playwright uses the backend-reported protocol (`h2`, `http/1.1`),
-  // falling back to the HAR default when absent.
-  let http_version = resp.http_version().await.unwrap_or_else(|| "HTTP/1.1".to_string());
+  // falling back to the HAR default when absent. Only await the finished
+  // version when the response already finished; an open stream must not
+  // block HAR export.
+  let http_version = if finished {
+    resp.http_version().await
+  } else {
+    resp.http_version_now().await
+  }
+  .unwrap_or_else(|| "HTTP/1.1".to_string());
   (
     HarResponseOut {
       status: resp.status(),

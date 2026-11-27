@@ -2,6 +2,9 @@
 // expect.poll takes every generic matcher and, on timeout, reports the
 // last failure with the predicate timeout in its call log.
 import { test, expect } from '@ferridriver/test';
+import { runOnceAcrossProjects } from './helpers/projects';
+
+test.beforeEach(runOnceAcrossProjects);
 
 test.describe('expect.poll', () => {
   test('polls sync, async and promise-returning predicates', async () => {

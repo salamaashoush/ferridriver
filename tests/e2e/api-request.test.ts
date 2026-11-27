@@ -3,6 +3,9 @@
 // fixture). Test titles mirror the original Rust fn names.
 
 import { test, describe, expect } from '@ferridriver/test';
+import { runOnceAcrossProjects } from './helpers/projects';
+
+test.beforeEach(runOnceAcrossProjects);
 
 describe('api request', () => {
   test('api_response_server_addr', async ({ request, baseURL }) => {
